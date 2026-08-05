@@ -264,6 +264,14 @@ async def human_confirm(req: HumanConfirmRequest):
     return {"success": result.get("success", False), "data": result}
 
 
+# ── 崩溃恢复：进程 crash 后从 checkpoint 重新拉起未完成线程 ──
+@app.post("/chat/recover")
+async def chat_recover(req: HumanConfirmRequest):
+    from agent.graph import recover_thread
+    result = await recover_thread(req.thread_id, {"action": req.action or "reject"})
+    return {"success": result.get("success", False), "data": result}
+
+
 # ── 文档上传（异步，MQ 消费）──────────────────────
 @app.post("/docs/upload")
 async def upload_doc(file: UploadFile = File(...), tenant_id: str = Header("default")):

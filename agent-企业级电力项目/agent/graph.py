@@ -10,7 +10,7 @@ import logging
 import re
 
 from langgraph.graph import StateGraph, END
-from langgraph.types import interrupt, Command
+from langgraph.types import interrupt, Command, RetryPolicy
 
 from agent.state import AgentState, create_initial_state
 from agent.context_manager import context_manager
@@ -47,6 +47,41 @@ _INTENT_TO_SKILL = {i: _current_domain.intent_to_skill(i) for i in _current_doma
 DEFAULT_INTENT = list(INTENT_KEYWORDS.keys())[0] if INTENT_KEYWORDS else "chat"
 
 _COMPOUND_CONNECTORS = ["且", "并且", "同时", "再", "然后", "还要"]
+
+# ── 节点级重试：LLM/网络瞬态错误自动重试，逻辑错误不重试 ──
+def _retryable(exc: Exception) -> bool:
+    """返回 True 表示该异常值得重试（瞬态错误），False 则不重试（逻辑错误）。
+
+    默认 RetryPolicy 对 RuntimeError 不重试，而 unified_llm 全后端失败
+    恰好抛 RuntimeError("所有 LLM 后端均不可用")——这是"值得重试"的瞬态
+    失败（上游限流/网络抖动），所以要显式放行。
+    """
+    import httpx
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        # 5xx 服务端错误 / 429 限流值得重试；4xx 逻辑错误不重试
+        return 429 <= exc.response.status_code or 500 <= exc.response.status_code
+    if isinstance(exc, ConnectionError):
+        return True
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    if isinstance(exc, RuntimeError):
+        # unified_llm 全后端失败抛 RuntimeError —— 视为瞬态，重试整个节点
+        return True
+    # 其余未知异常：交给默认判断（默认重试）
+    return True
+
+
+# agent_execute_node：LLM 推理节点，最容易因超时/网络瞬态失败
+AGENT_RETRY_POLICY = RetryPolicy(
+    max_attempts=3,          # 含首次，共 3 次尝试
+    initial_interval=1.0,    # 首次重试前等待 1s
+    backoff_factor=2.0,      # 指数退避：1s → 2s → 4s
+    max_interval=30.0,
+    jitter=True,             # 加随机抖动，避免重试风暴
+    retry_on=_retryable,
+)
 
 # ── 复杂度预判 ──────────────────────────────────
 def _judge_complexity(state: AgentState) -> dict:
@@ -250,27 +285,40 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
 
 
 async def _agent_execute_stream(state, task, messages, queue, user_id, thread_id, intent):
-    """流式执行：逐 token 推送，同时累积最终内容"""
-    collected = ""
-    thinking_notified = False
-    try:
-        async for chunk in unified_llm.astream(task, messages):
-            if chunk["type"] == "thinking":
-                # 不暴露内部推理链：仅在首个思考 chunk 推一条通用提示
-                if not thinking_notified:
-                    thinking_notified = True
-                    await queue.put({"type": "thinking",
-                                     "data": {"content": "正在深度思考中，请稍候…",
-                                              "nodeName": "deepseek"}})
-            elif chunk["text"]:
-                collected += chunk["text"]
-                await queue.put({"type": "reply", "data": {"content": chunk["text"],
-                                                           "is_final": False}})
-            if chunk.get("is_final"):
+    """流式执行：逐 token 推送，同时累积最终内容。
+
+    astream 是生成器，失败发生在迭代中途——langgraph 的 retry_policy 只会
+    重跑整个节点，但流式路径的异常被这里 catch 后返回兜底文案，不会冒泡到
+    节点层触发 retry。所以流式场景在这里自己做重试：整体失败则重置重新流一次。
+    """
+    max_stream_attempts = 3
+    for attempt in range(1, max_stream_attempts + 1):
+        collected = ""
+        thinking_notified = False
+        try:
+            async for chunk in unified_llm.astream(task, messages):
+                if chunk["type"] == "thinking":
+                    # 不暴露内部推理链：仅在首个思考 chunk 推一条通用提示
+                    if not thinking_notified:
+                        thinking_notified = True
+                        await queue.put({"type": "thinking",
+                                         "data": {"content": "正在深度思考中，请稍候…",
+                                                  "nodeName": "deepseek"}})
+                elif chunk["text"]:
+                    collected += chunk["text"]
+                    await queue.put({"type": "reply", "data": {"content": chunk["text"],
+                                                               "is_final": False}})
+                if chunk.get("is_final"):
+                    break
+            # 正常流完：哪怕无内容也返回（不重试，避免死循环）
+            break
+        except Exception as e:
+            logger.error(f"流式推理失败(第{attempt}/{max_stream_attempts}次): {e}")
+            # 已输出部分内容也失败：重试会重复推送，放弃重试直接兜底
+            if collected or attempt >= max_stream_attempts:
                 break
-    except Exception as e:
-        logger.error(f"流式推理失败: {e}")
-        collected = collected or "（推理服务异常，请稍后重试）"
+            await asyncio.sleep(min(2 ** (attempt - 1), 8))   # 1s → 2s → 4s 退避
+            continue
     if not collected:
         collected = "抱歉，知识库中未找到相关资料，无法回答您的问题。建议查阅相关规程文档或联系运维人员。"
     return {
@@ -465,7 +513,7 @@ def build_graph():
     workflow.add_node("cache_check", cache_check_node)
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("rag_retrieve", rag_retrieve_node)
-    workflow.add_node("agent_execute", agent_execute_node)
+    workflow.add_node("agent_execute", agent_execute_node, retry_policy=AGENT_RETRY_POLICY)
     workflow.add_node("fact_check", fact_check_node)
     workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("memory_write", memory_write_node)
@@ -571,4 +619,48 @@ async def resume_agent(thread_id: str, decision: dict):
                 "intent": result.get("intent", "")}
     except Exception as e:
         logger.error(f"恢复失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def recover_thread(thread_id: str, decision: dict = None) -> dict:
+    """崩溃恢复：进程 crash 后从最近 checkpoint 重新拉起未完成线程。
+
+    LangGraph 的 checkpoint 记录在每个节点入口前。崩溃发生时 state 停在
+    某节点入口前的 checkpoint——重新 ainvoke 会从该 checkpoint 继续回放，
+    崩掉的那个节点会重跑（配合 retry_policy 吸收瞬态错误）。
+
+    与 resume_agent 的区别：
+      - resume_agent：图主动 interrupt 挂起（HITL），用 Command(resume) 精准恢复
+      - recover_thread：图异常终止（崩溃），从 checkpoint 回放续跑
+    """
+    graph = await _ensure_graph()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    # 1. 校验线程存在
+    try:
+        snap = await graph.aget_state(config)
+    except Exception as e:
+        return {"success": False, "error": f"无法读取线程状态: {e}"}
+
+    # 2. 若线程有挂起的 interrupt（HITL），走 resume 而非崩溃恢复
+    if getattr(snap, "interrupts", ()) or ():
+        return await resume_agent(thread_id, decision or {"action": "reject"})
+
+    # 3. 无 checkpoint（线程从未开始或已完成），无恢复价值
+    snap_values = getattr(snap, "values", None) or {}
+    if not snap_values:
+        return {"success": False, "error": "线程无 checkpoint，无法恢复"}
+
+    # 4. checkpoint 已有 agent_output：图已完成，无需恢复
+    if snap_values.get("agent_output"):
+        return {"success": True, "reply": snap_values.get("agent_output", ""),
+                "intent": snap_values.get("intent", ""), "recovered": False}
+
+    # 5. 从 checkpoint 继续回放。传入空 input，图从上次停点续跑。
+    try:
+        result = await graph.ainvoke({"__resume__": True}, config=config)
+        return {"success": True, "reply": result.get("agent_output", ""),
+                "intent": result.get("intent", "")}
+    except Exception as e:
+        logger.error(f"线程恢复失败: {e}")
         return {"success": False, "error": str(e)}
