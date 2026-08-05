@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
                     f"(doc_count={rag_service.count()})")
     except Exception as e:
         logger.warning(f"向量库未就绪: {e}")
+    # 预热 Embedding 模型（BGE-M3，首次加载 ~6s；to_thread 避免阻塞事件循环）
+    try:
+        from rag.embedder import embedding_provider
+        await asyncio.to_thread(embedding_provider._get)
+        logger.info(f"✅ Embedding 模型预热完成: {settings.embedding_model} "
+                    f"(device={settings.embedding_device})")
+    except Exception as e:
+        logger.warning(f"Embedding 预热失败（懒加载兜底）: {e}")
     from agent.skills.bootstrap import skill_registry
     logger.info(f"✅ Skills 已注册: {skill_registry.all_names()}")
     logger.info(f"✅ API 就绪: http://{settings.api_host}:{settings.api_port}")
