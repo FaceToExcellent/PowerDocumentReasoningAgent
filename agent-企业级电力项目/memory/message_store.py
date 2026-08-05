@@ -1,0 +1,109 @@
+"""消息流水存储 — chat_message 三 ID 表（user_id / thread_id / reply_id）
+本机用 SQLite 保证可跑；表结构与计划书 MySQL 版一致，生产可切。
+核心设计：记忆独立于大模型存储，推理前按需读取，不放模型上下文。
+"""
+import json
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+from config.settings import settings
+from config.logging_config import logger
+
+
+class MessageStore:
+    def __init__(self, db_path: str = None):
+        self._db_path = db_path or settings.sqlite_audit_db
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _init_db(self):
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_message (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT DEFAULT '',
+                    user_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    reply_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_type TEXT DEFAULT 'text',
+                    intent TEXT DEFAULT '',
+                    tokens INTEGER DEFAULT 0,
+                    created_at REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_thread "
+                         "ON chat_message(tenant_id, user_id, thread_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reply "
+                         "ON chat_message(tenant_id, thread_id, reply_id)")
+
+    # ── 写 ──
+    def add(self, *, tenant_id="", user_id="", thread_id="", reply_id="",
+            role="", content="", content_type="text", intent="", tokens=0) -> int:
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO chat_message (tenant_id,user_id,thread_id,reply_id,role,"
+                "content,content_type,intent,tokens,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (tenant_id, user_id, thread_id, reply_id, role, content,
+                 content_type, intent, tokens, time.time()),
+            )
+            return cur.lastrowid
+
+    # ── 读 ──
+    def get_recent(self, *, tenant_id="", user_id="", thread_id="", limit=20) -> List[Dict]:
+        """最近 N 轮消息（按时间倒序取，再正序返回）"""
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM chat_message WHERE tenant_id=? AND user_id=? AND thread_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (tenant_id, user_id, thread_id, limit),
+            ).fetchall()
+        msgs = [dict(r) for r in reversed(rows)]
+        return msgs
+
+    def get_thread(self, *, tenant_id="", user_id="", thread_id="") -> List[Dict]:
+        """整条会话流水"""
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM chat_message WHERE tenant_id=? AND user_id=? AND thread_id=? "
+                "ORDER BY created_at",
+                (tenant_id, user_id, thread_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_by_reply(self, *, tenant_id="", thread_id="", reply_id="") -> List[Dict]:
+        """按 reply_id 精确回溯（thinking + 正文 + 工具调用多段）"""
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM chat_message WHERE tenant_id=? AND thread_id=? AND reply_id=? "
+                "ORDER BY id",
+                (tenant_id, thread_id, reply_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def semantic_search(self, *, tenant_id="", user_id="", query="", top_k=5) -> List[Dict]:
+        """轻量语义召回：关键词匹配最近消息（本机无向量版；生产可接 Milvus 记忆向量）"""
+        kws = [k for k in query[:8] if len(k) > 1]
+        if not kws:
+            return []
+        cond = " OR ".join(["content LIKE ?"] * len(kws))
+        params = [f"%{k}%" for k in kws]
+        with self._lock, sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM chat_message WHERE tenant_id=? AND user_id=? AND ({cond}) "
+                f"AND role='assistant' ORDER BY created_at DESC LIMIT ?",
+                (tenant_id, user_id, *params, top_k),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+message_store = MessageStore()

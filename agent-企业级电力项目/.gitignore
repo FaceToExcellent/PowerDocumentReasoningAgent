@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# 环境变量（含密钥，永不入库）
+.env
+.env.ahe
+*.key
+
+# 数据 / 日志 / 缓存
+data/
+logs/
+chroma_db/
+*.db
+*.sqlite
+
+# 前端
+node_modules/
+frontend-vue-电力/dist/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
