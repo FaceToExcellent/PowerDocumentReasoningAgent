@@ -203,6 +203,24 @@ async def rag_retrieve_node(state: AgentState) -> dict:
 
 
 # ── 节点 4：Agent 执行（模型分级 + 流式 + Skill）─
+def _build_kg_evidence(user_input: str) -> str:
+    """从用户输入抽实体 → 查 KG 一跳关系 → 格式化为证据文本"""
+    try:
+        from rag.kg.entity_index import entity_index
+        entities = entity_index.extract_entities(user_input)
+        if not entities:
+            return ""
+        lines = []
+        for ent in entities:
+            rels = entity_index.query(ent)
+            for r in rels:
+                lines.append(f"  {r['subject']} --[{r['relation']}]--> {r['object']}")
+        return "\n".join(lines) if lines else ""
+    except Exception as e:
+        logger.debug(f"KG 证据构建跳过: {e}")
+        return ""
+
+
 async def agent_execute_node(state: AgentState) -> dict:
     intent = state.get("intent", "chat")
     user_input = state.get("user_input", "")
@@ -224,6 +242,9 @@ async def agent_execute_node(state: AgentState) -> dict:
             f"{it.get('doc',{}).get('content','')[:300]}"
             for it in state["rag_results"][:5])
 
+    # ⭐ KG 关系证据：从用户输入抽实体 → 查一跳关系 → 拼入证据（复杂推理）
+    kg_evidence = _build_kg_evidence(user_input)
+
     messages = [{"role": "system", "content": sys_prompt}]
     if memory_ctx:
         messages.append({"role": "system", "content": f"参考记忆：\n{memory_ctx}"})
@@ -233,6 +254,8 @@ async def agent_execute_node(state: AgentState) -> dict:
         # 无检索结果：显式提示，避免 LLM 编造或只输出推理链
         messages.append({"role": "system",
                          "content": "本次未检索到相关文档依据。若问题涉及具体规程/数值，请明确回复'抱歉，知识库中未找到相关资料'，不要编造答案。"})
+    if kg_evidence:
+        messages.append({"role": "system", "content": f"设备/规程实体关系（知识图谱）：\n{kg_evidence}"})
     if state.get("fact_check_feedback"):
         messages.append({"role": "system",
                          "content": f"上次校验未通过，请修正：{state['fact_check_feedback']}"})
@@ -480,7 +503,7 @@ def route_after_agent(state: AgentState) -> str:
 # ── 并行 fan-out / 汇总（M5.5）──────────────────
 def fan_out_parallel(state: AgentState) -> list:
     """supervisor 判定 parallel 时，把每个意图作为独立子任务分发"""
-    from langgraph.constants import Send
+    from langgraph.types import Send
     plan = state.get("routing_plan") or {}
     intents = plan.get("intents", [])
     sends = []
@@ -524,7 +547,8 @@ def build_graph():
 
     workflow.add_conditional_edges("cache_check", route_after_cache,
                                    {"supervisor": "supervisor", "execution_log": "execution_log"})
-    workflow.add_edge("supervisor", "rag_retrieve")
+    # supervisor → parallel 时 fan_out（Send 分发子 Agent） / fast 时单路径 rag_retrieve
+    workflow.add_conditional_edges("supervisor", fan_out_parallel, ["rag_retrieve"])
     workflow.add_edge("rag_retrieve", "agent_execute")
     # agent_execute → (高危) hitl_review / (parallel 时 aggregate) / (fast 时 fact_check)
     workflow.add_conditional_edges("agent_execute", route_after_agent,

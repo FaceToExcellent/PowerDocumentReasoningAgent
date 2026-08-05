@@ -12,6 +12,7 @@ dependencies = [
     "langgraph>=1.2.0",
     "langgraph-checkpoint>=4.1.0",
     "langgraph-checkpoint-sqlite>=3.1.0",
+    "llama-index-core>=0.12.0",
 
     # 向量检索
     "langchain-milvus>=0.1.0",
