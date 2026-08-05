@@ -567,6 +567,7 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
     start = time.time()
     thread_id = thread_id or f"th-{uuid.uuid4().hex[:8]}"
     reply_id = f"r-{uuid.uuid4().hex[:8]}"
+    logger.info(f"▶ 开始处理: thread={thread_id} tenant={tenant_id} intent=待定 input={user_input[:50]}")
     graph = await _ensure_graph()
     # 官方 AsyncSqliteSaver 实例需从模块内最新全局取（import 绑定是 None）
     from agent.checkpointer import init_checkpointer
@@ -577,6 +578,7 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
     if restored:
         cv = restored.checkpoint.get("channel_values", {})
         if cv.get("agent_output") and cv.get("user_input") == user_input:
+            logger.info(f"♻️ checkpoint 命中（同一输入已答过），直接复用: thread={thread_id}")
             return {"success": True, "reply": cv.get("agent_output", ""),
                     "intent": cv.get("intent", ""), "confidence": cv.get("confidence", 0),
                     "source": "checkpoint", "duration_ms": int((time.time() - start) * 1000)}
@@ -592,6 +594,10 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
         result = await graph.ainvoke(state, config=config)
+        dur = int((time.time() - start) * 1000)
+        logger.info(f"✅ 处理完成: thread={thread_id} intent={result.get('intent','')} "
+                    f"耗时={dur}ms fact_check={result.get('fact_check_passed', True)} "
+                    f"confidence={result.get('confidence_level','high')}")
         return {
             "success": True,
             "reply": result.get("agent_output", ""),
@@ -602,10 +608,10 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
             "fact_check_passed": result.get("fact_check_passed", True),
             "confidence_level": result.get("confidence_level", "high"),
             "reply_id": result.get("reply_id", ""),
-            "duration_ms": int((time.time() - start) * 1000),
+            "duration_ms": dur,
         }
     except Exception as e:
-        logger.error(f"Agent 执行失败: {e}", exc_info=True)
+        logger.error(f"❌ Agent 执行失败: {e}", exc_info=True)
         return {"success": False, "error": str(e), "reply": "系统处理异常，请重试。"}
 
 
@@ -613,12 +619,14 @@ async def resume_agent(thread_id: str, decision: dict):
     """HITL 恢复：Command(resume) 作为 input 传入（langgraph 1.2 签名）"""
     graph = await _ensure_graph()
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    logger.info(f"▶ HITL 人工决策到达: thread={thread_id} action={decision.get('action')}")
     try:
         result = await graph.ainvoke(Command(resume=decision), config=config)
+        logger.info(f"✅ HITL 恢复执行完成: thread={thread_id} action={decision.get('action')}")
         return {"success": True, "reply": result.get("agent_output", ""),
                 "intent": result.get("intent", "")}
     except Exception as e:
-        logger.error(f"恢复失败: {e}")
+        logger.error(f"❌ HITL 恢复失败: thread={thread_id} error={str(e)[:150]}")
         return {"success": False, "error": str(e)}
 
 
@@ -635,32 +643,38 @@ async def recover_thread(thread_id: str, decision: dict = None) -> dict:
     """
     graph = await _ensure_graph()
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    logger.info(f"▶ 崩溃恢复启动: thread={thread_id}")
 
     # 1. 校验线程存在
     try:
         snap = await graph.aget_state(config)
     except Exception as e:
+        logger.error(f"❌ 崩溃恢复：无法读取线程状态: thread={thread_id} err={str(e)[:120]}")
         return {"success": False, "error": f"无法读取线程状态: {e}"}
 
     # 2. 若线程有挂起的 interrupt（HITL），走 resume 而非崩溃恢复
     if getattr(snap, "interrupts", ()) or ():
+        logger.info(f"↩️ 线程 {thread_id} 处于 HITL 挂起，转 resume")
         return await resume_agent(thread_id, decision or {"action": "reject"})
 
     # 3. 无 checkpoint（线程从未开始或已完成），无恢复价值
     snap_values = getattr(snap, "values", None) or {}
     if not snap_values:
+        logger.warning(f"⚠️ 崩溃恢复：线程 {thread_id} 无 checkpoint，无法恢复")
         return {"success": False, "error": "线程无 checkpoint，无法恢复"}
 
     # 4. checkpoint 已有 agent_output：图已完成，无需恢复
     if snap_values.get("agent_output"):
+        logger.info(f"✅ 崩溃恢复：线程 {thread_id} 已完成，无需恢复")
         return {"success": True, "reply": snap_values.get("agent_output", ""),
                 "intent": snap_values.get("intent", ""), "recovered": False}
 
     # 5. 从 checkpoint 继续回放。传入空 input，图从上次停点续跑。
     try:
         result = await graph.ainvoke({"__resume__": True}, config=config)
+        logger.info(f"✅ 崩溃恢复完成: thread={thread_id} intent={result.get('intent','')}")
         return {"success": True, "reply": result.get("agent_output", ""),
                 "intent": result.get("intent", "")}
     except Exception as e:
-        logger.error(f"线程恢复失败: {e}")
+        logger.error(f"❌ 崩溃恢复失败: thread={thread_id} err={str(e)[:150]}")
         return {"success": False, "error": str(e)}

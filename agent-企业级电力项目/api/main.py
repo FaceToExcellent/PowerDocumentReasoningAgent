@@ -168,20 +168,24 @@ async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_
         try:
             async for update in agent_graph.astream(state, config, stream_mode="updates"):
                 if abort_event.is_set():
+                    logger.info(f"⏹ 线程 {thread_id} 被中止（前端取消）")
                     break
                 if "__interrupt__" in update:
                     # HITL：图挂起等待人工确认，通知主循环后退出
+                    logger.info(f"⏸ [HITL] 线程 {thread_id} 在节点执行处挂起，等待人工确认")
                     await token_queue.put({"type": "hitl_interrupt", "data": {}})
                     break
                 for node_name, node_data in update.items():
                     final_state.update(node_data)
+                    logger.info(f"  ✅ 节点 [{node_name}] 完成")
                     await token_queue.put({"type": "token_stat",
                                            "data": {"status_summary_title":
                                                     f"节点 {node_name} 完成"}})
         except (asyncio.CancelledError, NodeCancelledError):
-            pass
+            logger.info(f"⏹ 线程 {thread_id} 被取消")
         except Exception as e:
             graph_error = e
+            logger.error(f"❌ 图执行异常终止: {str(e)[:200]}")
         finally:
             await token_queue.put({"type": "graph_done", "data": {}})
 
