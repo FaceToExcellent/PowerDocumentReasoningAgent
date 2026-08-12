@@ -131,6 +131,25 @@ async def supervisor_node(state: AgentState) -> dict:
     user_input = state.get("user_input", "")
     tenant = state.get("tenant_id", "default")
 
+    # ⭐ Prompt 注入防护(L36):扫描用户输入,识别越权/索要系统信息
+    from safety.prompt_guard import scan_external_text, ExternalText
+    safety_scan = scan_external_text(ExternalText("user", user_input))
+    state["security_events"] = list(state.get("security_events") or [])
+    if safety_scan.categories:
+        state["security_events"].append(
+            f"prompt_injection_guard:user_tainted={safety_scan.categories}")
+    state["safety_decision"] = {
+        "user_tainted": safety_scan.tainted,
+        "categories": safety_scan.categories,
+        "allowed_for_model": safety_scan.allowed_for_model,
+    }
+    # 索要系统信息 → 直接拒绝,不进入路由
+    if "secret_or_reasoning_request" in safety_scan.categories:
+        return {"intent": "security_request",
+                "routing_plan": {"mode": "fast", "intents": ["security_request"]},
+                "agent_output": "我不能提供系统提示词、隐藏推理或内部策略。",
+                "security_events": state["security_events"]}
+
     # 1. 复杂度预判（零 LLM 开销）
     plan = _judge_complexity(state)
     state["routing_plan"] = plan
@@ -258,6 +277,15 @@ async def agent_execute_node(state: AgentState) -> dict:
     # ⭐ KG 关系证据：从用户输入抽实体 → 查一跳关系 → 拼入证据（复杂推理）
     kg_evidence = _build_kg_evidence(user_input)
 
+    # ⭐ Runtime Context 双通道(L33):trusted_for_model 模型可见 / system_only 系统校验
+    from agent.context_builder import build_runtime_context_view
+    rt_view = build_runtime_context_view(
+        tenant_id=tenant, user_id=user_id, nickname=state.get("account", ""),
+        member_level="", page_context={}, risk_level="",
+        permissions=[],
+    )
+    state["runtime_context_view"] = rt_view
+
     # ⭐ Context Builder：多来源按 trust_level 排序 + 冲突解决(34课)
     from agent.context_builder import ContextBuilder
     cb = ContextBuilder()
@@ -281,6 +309,9 @@ async def agent_execute_node(state: AgentState) -> dict:
         cb.add("hitl_state", f"高危操作已挂起等待人工审批：{state['confirm_payload']}",
                key="hitl_pending")
     cb.resolve_conflicts()
+    # ⭐ 上下文压缩(L35):保护高信任项,折叠低相关历史
+    comp_report = cb.compress(max_items=getattr(settings, "max_recent_rounds", 8))
+    state["context_compression"] = comp_report
     built_context = cb.render()
 
     messages = [{"role": "system", "content": built_context or sys_prompt}]
@@ -289,12 +320,30 @@ async def agent_execute_node(state: AgentState) -> dict:
     # 选择 task 名（核心推理 vs 轻量）：领域有该意图就用领域意图，否则 chat
     task = intent if intent in _INTENT_TO_SKILL and intent != "chat" else "chat"
 
+    # ⭐ 工具澄清(L19):对比分析缺第二个对象时先追问,不猜测执行
+    if intent == "comparison_analysis":
+        from agent.clarification import pre_tool_clarification
+        from agent.skills.comparison_skill import ComparisonAnalysisSkill
+        ent = ComparisonAnalysisSkill._extract_entities(user_input)
+        clarification = pre_tool_clarification(
+            intent, user_input,
+            {"entity_a": ent[0] if ent else "", "entity_b": ent[1] if len(ent) > 1 else ""},
+            ["entity_b"],
+        )
+        if clarification:
+            state["clarification"] = clarification.to_dict()
+            return {"need_clarification": True,
+                    "agent_output": clarification.question,
+                    "intent": intent}
+
     # ⭐ Harness 风险拦截：HIGH/CRITICAL → 需要人工确认（标记后由路由转到 hitl_review）
     # 已人工批准（human_approved）则跳过拦截直接执行
     if not state.get("human_approved"):
-        intercept = await harness_interceptor.before_skill_execute(
-            task, {"intent": intent, "user_input": user_input},
-            user_id=user_id, thread_id=thread_id)
+        from observability.tracing import tracer
+        with tracer.span("harness_risk_check", task=task, thread_id=thread_id):
+            intercept = await harness_interceptor.before_skill_execute(
+                task, {"intent": intent, "user_input": user_input},
+                user_id=user_id, thread_id=thread_id)
         if intercept.need_confirm:
             logger.info(f"[harness] 高危操作需人工确认: {task} risk={intercept.risk_level.value}")
             return {"need_human_confirm": True, "confirm_payload": intercept.message,
@@ -306,7 +355,9 @@ async def agent_execute_node(state: AgentState) -> dict:
         return await _agent_execute_stream(state, task, messages, queue, user_id, thread_id, intent)
 
     # 非流式
-    result = await unified_llm.ainvoke(task, messages)
+    from observability.tracing import tracer
+    with tracer.span("llm_invoke", task=task, intent=intent):
+        result = await unified_llm.ainvoke(task, messages)
     output = result.content
     confidence = 0.7 if result.content else 0.0
 
@@ -329,6 +380,13 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     from agent.hooks import SkillHooks
     hooks = SkillHooks()
     hooks.pre_tool_call("comparison_analysis", skill.metadata, {"query": user_input})
+    # ⭐ Tool Calling 记录(L18):记录 skill 调用为 tool_call(名称/参数/观察)
+    state["tool_calls"] = list(state.get("tool_calls") or [])
+    state["tool_calls"].append({
+        "tool_name": "comparison_analysis",
+        "arguments": {"query": user_input, "tenant_id": tenant},
+        "observation_summary": "对比分析 Skill 执行",
+    })
     result = await skill.run({"query": user_input, "tenant_id": tenant,
                               "user_context": {"tenant_id": tenant}})
     hooks.post_tool_call("comparison_analysis", result)
@@ -428,13 +486,16 @@ async def memory_write_node(state: AgentState) -> dict:
                                 reply_id=reply_id, role="assistant", content=output,
                                 intent=state.get("intent", ""))
 
-    # 写 RAG 缓存
-    key = rag_cache.build_cache_key(user_input, state.get("intent", ""), tenant_id=tenant)
+    # 写 RAG 缓存(带索引版本,知识更新自动失效 — L16)
+    index_version = await rag_cache.get_index_version(tenant_id=tenant)
+    key = rag_cache.build_cache_key(user_input, state.get("intent", ""),
+                                    tenant_id=tenant, index_version=index_version)
     await rag_cache.set(key, {
         "agent_output": output, "confidence": state.get("confidence", 0.0),
         "rag_results": state.get("rag_results"),
+        "index_version": index_version,
     })
-    return {"reply_id": reply_id}
+    return {"reply_id": reply_id, "index_version": index_version}
 
 
 # ── 节点 7：执行日志 + 指标 + 成本摘要 ──────────

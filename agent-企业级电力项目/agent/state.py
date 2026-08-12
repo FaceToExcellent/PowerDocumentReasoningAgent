@@ -26,6 +26,9 @@ class AgentState(TypedDict, total=False):
     citations: Optional[List[Dict]]       # 引用依据(来源/分数/片段) — 证据治理层
     cost_summary: Optional[Dict]          # 请求级成本摘要 — 证据治理层
     hook_events: Optional[List[Dict]]     # Hooks 治理事件 — 能力执行层
+    runtime_context_view: Optional[Dict]  # Runtime Context 双通道(模型可见/系统校验)
+    context_compression: Optional[Dict]   # 上下文压缩报告(protected/折叠)
+    tool_calls: Optional[List[Dict]]      # Tool Calling 记录(名称/参数/观察)
 
     # Agent 输出
     agent_output: Optional[str]
@@ -43,6 +46,10 @@ class AgentState(TypedDict, total=False):
     human_intervened: bool
     human_action: Optional[str]
     human_approved: bool               # 人工确认后放行标记，避免二次拦截
+
+    # 工具澄清(19课)
+    need_clarification: bool
+    clarification: Optional[Dict]
 
     # 缓存
     cache_hit: bool
@@ -68,6 +75,7 @@ class AgentState(TypedDict, total=False):
 
     # 安全
     security_events: Annotated[List[str], operator.add]
+    safety_decision: Optional[Dict]       # Prompt 注入扫描决策
 
     # 错误
     error: Optional[str]
@@ -86,6 +94,7 @@ def create_initial_state(thread_id="", user_id="", account="anonymous", employee
         confidence_level="high",
         need_human_confirm=False, confirm_payload=None,
         human_intervened=False, human_action=None, human_approved=False,
+        need_clarification=False, clarification=None,
         cache_hit=False, iteration_count=0, max_iterations=3,
         start_time=0.0, timeout_seconds=180, duration_ms=0,
         messages=[], context_summary=None, recent_rounds=[],

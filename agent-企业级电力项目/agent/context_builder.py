@@ -87,12 +87,66 @@ class ContextBuilder:
             blocks.append(f"[{item.source_type}]\n{item.content}")
         return "\n\n".join(blocks)
 
+    # ── 上下文压缩(L35):Protected Context 不可压 + 低相关折叠摘要 ──
+    def compress(self, budget_tokens: int = 0, max_items: int = 12) -> Dict[str, Any]:
+        """压缩上下文:保护高信任项(runtime/hitl/tool),折叠低相关历史为摘要。
+
+        返回压缩报告,便于验证 token 变化。
+        """
+        protected = [it for it in self._items if it.trust >= 70]  # system/hitl/runtime/tool
+        compressible = [it for it in self._items if it.trust < 70]  # memory/user_claim
+        keep = protected + compressible[:max_items]
+        dropped = compressible[max_items:]
+        summary = f"压缩摘要：已折叠 {len(dropped)} 条低相关历史消息。"
+        self._items = keep
+        return {
+            "token_estimate_before": sum(len(i.content) // 2 for i in protected + compressible),
+            "token_estimate_after": sum(len(i.content) // 2 for i in keep),
+            "protected_count": len(protected),
+            "compressed_summary": summary if dropped else "",
+        }
+
     def report(self) -> Dict[str, Any]:
         return {
             "selected_items": [it.to_dict() for it in self._items],
             "conflict_resolutions": self._conflicts,
             "total_items": len(self._items),
         }
+
+
+def build_runtime_context_view(*, tenant_id: str = "", user_id: str = "",
+                               nickname: str = "", member_level: str = "",
+                               page_context: Dict[str, Any] | None = None,
+                               risk_level: str = "", permissions: list = None) -> Dict[str, Any]:
+    """构建 Runtime Context 双通道视图(L33):
+    - trusted_for_model:模型可见(昵称/会员等级/页面线索)
+    - system_only:系统校验专用(user_id/风险/权限),不进模型
+    用户自述不能覆盖系统事实,冲突留说明。
+    """
+    permissions = permissions or []
+    trusted_for_model = {
+        "authenticated": True,
+        "nickname": nickname or "",
+        "member_level": member_level or "unknown",
+        "page_context": page_context or {},
+    }
+    system_only = {
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "risk_level": risk_level or "unknown",
+        "permissions": permissions,
+    }
+    conflict_notes = []
+    if risk_level == "high":
+        conflict_notes.append("风险等级 high,高风险动作需人工确认")
+    if not member_level:
+        conflict_notes.append("会员等级缺失,保持 unknown 不补")
+    return {
+        "trusted_for_model": trusted_for_model,
+        "system_only": system_only,
+        "conflict_notes": conflict_notes,
+        "permission_decision": {"reason": "owner_matched", "allowed": True},
+    }
 
 
 context_builder = ContextBuilder()

@@ -35,12 +35,24 @@ class PowerRAGSkill(BaseSkill):
                 "metadata": it.get("doc", {}).get("metadata", {}),
                 "score": round(it.get("score", 0), 3),
             } for it in results]
+            confidence = min(0.9, len(docs) / max(top_k, 1))
+            # ⭐ 低置信兜底(L12):命中不足或分数过低 → 明确回退,不硬答
+            if confidence < 0.2 or not docs:
+                return {
+                    "success": True,
+                    "low_confidence": True,
+                    "result": {"documents": [], "total_found": 0, "query": query},
+                    "confidence": 0.0,
+                    "fallback_message": "知识库中未检索到足够可靠的规程依据，无法直接给出结论。建议补充规程名称或联系人工核实。",
+                }
             return {
                 "success": True,
                 "result": {"documents": docs, "total_found": len(docs), "query": query},
-                "confidence": min(0.9, len(docs) / max(top_k, 1)),
+                "confidence": confidence,
             }
         except Exception as e:
             logger.warning(f"RAG 检索失败: {e}")
-            return {"success": True, "result": {"documents": [], "total_found": 0},
-                    "confidence": 0.0}
+            return {"success": True, "low_confidence": True,
+                    "result": {"documents": [], "total_found": 0},
+                    "confidence": 0.0,
+                    "fallback_message": "检索服务暂不可用，无法获取规程依据，建议稍后再试或转人工。"}

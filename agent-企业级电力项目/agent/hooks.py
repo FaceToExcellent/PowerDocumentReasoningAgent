@@ -70,29 +70,51 @@ class SkillHooks:
         self.events.append(event)
         return event
 
-    # ── post_tool_call:结果脱敏 + 摘要 ──
+    # ── post_tool_call:结果脱敏 + 摘要 + omitted_fields 字段裁剪(L20) ──
     def post_tool_call(self, skill_name: str, result: Dict[str, Any]) -> HookEvent:
         output = str(result.get("result") or result.get("output") or "")
         safe_output = self.redact(output)
         redacted = safe_output != output
+        # ⭐ Observation 治理(L20):记录省略的内部字段,只留摘要进模型
+        omitted_fields = self._collect_omitted(result)
         event = HookEvent(
             hook_type="post_tool_call", target_name=skill_name,
-            result="sanitized" if redacted else "passed",
-            reason="Skill 结果脱敏后进入上下文,不暴露隐私/密钥",
-            safe_summary={"skill": skill_name,
-                          "output_preview": safe_output[:120],
-                          "redacted": redacted},
+            result="sanitized" if (redacted or omitted_fields) else "passed",
+            reason="Skill 结果脱敏 + 字段裁剪后进入上下文,不暴露隐私/密钥/内部字段",
+            safe_summary={
+                "skill": skill_name,
+                "output_preview": safe_output[:120],
+                "omitted_fields": omitted_fields,
+                "redacted": redacted,
+            },
             redacted=redacted,
         )
         self.events.append(event)
         return event
 
-    # ── on_error:异常归一成降级信号 ──
+    @staticmethod
+    def _collect_omitted(result: Dict[str, Any]) -> List[str]:
+        """识别应省略的内部字段(诊断/内部细节不进上下文)。"""
+        omitted = []
+        # 整对象返回:除白名单外都算省略
+        safe_keys = {"success", "result", "output", "answer", "analysis",
+                     "summary", "evidence", "citations", "confidence", "duration_ms",
+                     "entities", "kg_evidence", "documents", "total_found", "query",
+                     "answer_path", "matched_chunk_ids"}
+        for key in result.keys():
+            if key not in safe_keys and key not in omitted:
+                omitted.append(key)
+        return omitted[:10]
+
+    # ── on_error:异常归一成降级信号(带 error_category 分类) ──
     def on_error(self, skill_name: str, error: Exception) -> HookEvent:
+        from agent.degradation import classify_error
+        category = classify_error(error)
         event = HookEvent(
             hook_type="on_error", target_name=skill_name, result="degraded",
             reason="Skill 执行异常,归一成可读降级信号,不让链路静默失败",
-            safe_summary={"skill": skill_name, "error": str(error)[:120]},
+            safe_summary={"skill": skill_name, "error": str(error)[:120],
+                          "error_category": category},
             degraded=True,
         )
         self.events.append(event)

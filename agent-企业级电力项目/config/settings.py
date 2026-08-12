@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     embedding_device: str = "mps"                     # Apple MPS；Linux 改 cuda / cpu
     milvus_dim: int = 1024                            # BGE-M3 输出维度
+    reranker_model: str = "BAAI/bge-reranker-base"    # cross-encoder 重排(可选,无则本地兜底)
 
     # ── 缓存 ──
     redis_host: str = "127.0.0.1"
