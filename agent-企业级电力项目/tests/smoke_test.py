@@ -38,7 +38,9 @@ async def main():
     print("\n[M2] 推理层")
     from llm.adapter import unified_llm
     r = await unified_llm.ainvoke("supervisor", [{"role": "user", "content": "你好"}])
-    check(f"轻量任务走本地小模型（backend={r.backend}）", r.backend == "local_small")
+    # ⭐ 升级后:supervisor 走 DeepSeek chat(有 key)或本地小模型(无 key 降级)
+    check(f"轻量任务走 DeepSeek chat 或降级本地(backend={r.backend})",
+          r.backend in ("deepseek", "local_small") or r.backend == "local_reasoning")
 
     # ── M3 记忆 ──
     print("\n[M3] 记忆")

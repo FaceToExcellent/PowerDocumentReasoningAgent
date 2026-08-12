@@ -26,6 +26,7 @@ from observability.audit import audit_logger
 from observability.tracing import tracer
 from memory.manager import memory_manager
 from llm.adapter import unified_llm
+from llm.model_router import model_router
 from agent.skills.bootstrap import skill_registry
 from agent.skills.selector import skill_selector
 
@@ -196,9 +197,21 @@ async def rag_retrieve_node(state: AgentState) -> dict:
     from rag.retriever import rag_service
     result = rag_service.search(user_input, top_k=5, intent=intent, tenant_id=tenant)
     results = result.get("results", [])
+    # ⭐ 构建结构化 citations(证据治理层:来源/标题/分数/片段,可审计)
+    citations = [
+        {
+            "source": it.get("doc", {}).get("metadata", {}).get("source", ""),
+            "title": it.get("doc", {}).get("metadata", {}).get("title", ""),
+            "chunk_id": it.get("chunk_id", ""),
+            "score": round(float(it.get("score", 0)), 4),
+            "snippet": (it.get("doc", {}).get("content", "") or "")[:120],
+        }
+        for it in results[:5]
+    ]
     return {
         "rag_results": results,
         "rag_hit_rate": min(1.0, len(results) / 5),
+        "citations": citations,
     }
 
 
@@ -245,20 +258,32 @@ async def agent_execute_node(state: AgentState) -> dict:
     # ⭐ KG 关系证据：从用户输入抽实体 → 查一跳关系 → 拼入证据（复杂推理）
     kg_evidence = _build_kg_evidence(user_input)
 
-    messages = [{"role": "system", "content": sys_prompt}]
+    # ⭐ Context Builder：多来源按 trust_level 排序 + 冲突解决(34课)
+    from agent.context_builder import ContextBuilder
+    cb = ContextBuilder()
+    cb.add("runtime_context", f"tenant_id={tenant} user_id={user_id}", key="runtime_identity")
+    cb.add("system_rules", sys_prompt, key="system_prompt")
     if memory_ctx:
-        messages.append({"role": "system", "content": f"参考记忆：\n{memory_ctx}"})
+        cb.add("memory", f"参考记忆：\n{memory_ctx}", key="memory")
     if evidence:
-        messages.append({"role": "system", "content": f"检索到的文档：\n{evidence}"})
+        cb.add("tool_fact", f"检索到的文档：\n{evidence}", key="rag_evidence")
     else:
-        # 无检索结果：显式提示，避免 LLM 编造或只输出推理链
-        messages.append({"role": "system",
-                         "content": "本次未检索到相关文档依据。若问题涉及具体规程/数值，请明确回复'抱歉，知识库中未找到相关资料'，不要编造答案。"})
+        cb.add("system_rules",
+               "本次未检索到相关文档依据。若问题涉及具体规程/数值，请明确回复'抱歉，知识库中未找到相关资料'，不要编造答案。",
+               key="no_rag_fallback", priority=1)
     if kg_evidence:
-        messages.append({"role": "system", "content": f"设备/规程实体关系（知识图谱）：\n{kg_evidence}"})
+        cb.add("tool_fact", f"设备/规程实体关系（知识图谱）：\n{kg_evidence}", key="kg_evidence")
     if state.get("fact_check_feedback"):
-        messages.append({"role": "system",
-                         "content": f"上次校验未通过，请修正：{state['fact_check_feedback']}"})
+        cb.add("system_rules", f"上次校验未通过，请修正：{state['fact_check_feedback']}",
+               key="fc_feedback", priority=2)
+    # HITL 状态:审批中的事实是高信任,不能被用户新话覆盖
+    if state.get("need_human_confirm") and state.get("confirm_payload"):
+        cb.add("hitl_state", f"高危操作已挂起等待人工审批：{state['confirm_payload']}",
+               key="hitl_pending")
+    cb.resolve_conflicts()
+    built_context = cb.render()
+
+    messages = [{"role": "system", "content": built_context or sys_prompt}]
     messages.append({"role": "user", "content": user_input})
 
     # 选择 task 名（核心推理 vs 轻量）：领域有该意图就用领域意图，否则 chat
@@ -300,8 +325,16 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     skill = skill_registry.get("comparison_analysis")
     if not skill:
         return fallback_output
+    # ⭐ Hooks: Skill 执行前治理(必填参数/只读/风险) + 执行 + 结果脱敏
+    from agent.hooks import SkillHooks
+    hooks = SkillHooks()
+    hooks.pre_tool_call("comparison_analysis", skill.metadata, {"query": user_input})
     result = await skill.run({"query": user_input, "tenant_id": tenant,
                               "user_context": {"tenant_id": tenant}})
+    hooks.post_tool_call("comparison_analysis", result)
+    if not result.get("success"):
+        hooks.on_error("comparison_analysis", Exception(result.get("error", "skill failed")))
+    state["hook_events"] = [e.to_dict() for e in hooks.events] + [hooks.on_completion()]
     if result.get("success"):
         return result.get("result", {}).get("analysis", fallback_output)
     return fallback_output
@@ -404,12 +437,33 @@ async def memory_write_node(state: AgentState) -> dict:
     return {"reply_id": reply_id}
 
 
-# ── 节点 7：执行日志 + 指标 ──────────────────────
+# ── 节点 7：执行日志 + 指标 + 成本摘要 ──────────
 async def execution_log_node(state: AgentState) -> dict:
+    output = state.get("agent_output", "")
+    intent = state.get("intent", "")
+
+    # ⭐ 构建请求级 cost_summary(证据治理层:模型/路径/token 估算/来源数)
+    primary_backend = model_router.route(intent if intent != "chat" else "chat")
+    est_prompt = int(len(state.get("user_input", "")) / 2 + len(output) / 2)
+    est_total = int(len(output) / 2)
+    cost_summary = {
+        "path": "rag" if state.get("rag_results") else ("cache" if state.get("cache_hit") else "direct"),
+        "model_backend": primary_backend,
+        "intent": intent,
+        "rag_hits": len(state.get("rag_results") or []),
+        "citations_count": len(state.get("citations") or []),
+        "estimated_prompt_tokens": est_prompt,
+        "estimated_completion_tokens": est_total,
+        "estimated_total_tokens": est_prompt + est_total,
+        "cache_hit": state.get("cache_hit", False),
+        "fact_check_passed": state.get("fact_check_passed", True),
+        "confidence": state.get("confidence", 0),
+    }
+
     write_log(
         thread_id=state.get("thread_id", ""), account=state.get("account", "anonymous"),
-        emp_id=state.get("employee_id", ""), intent=state.get("intent", ""),
-        user_input=state.get("user_input", ""), output=state.get("agent_output", ""),
+        emp_id=state.get("employee_id", ""), intent=intent,
+        user_input=state.get("user_input", ""), output=output,
         confidence=state.get("confidence", 0.0),
         fc_passed=state.get("fact_check_passed", True),
         fc_errors=state.get("fact_check_errors", []),
@@ -420,16 +474,16 @@ async def execution_log_node(state: AgentState) -> dict:
         rag_hit_rate=state.get("rag_hit_rate", 0.0),
         tenant_id=state.get("tenant_id", ""), user_id=state.get("user_id", ""),
     )
-    metrics.incr("agent_request_total", labels={"intent": state.get("intent", "")})
+    metrics.incr("agent_request_total", labels={"intent": intent})
     metrics.observe("agent_latency_ms", time.time() - state.get("start_time", time.time()))
 
     recent = context_manager.update_recent_rounds(
         state.get("recent_rounds", []),
         state.get("user_input", ""),
-        (state.get("agent_output") or "")[:500],
+        (output or "")[:500],
         max_rounds=settings.max_recent_rounds,
     )
-    return {"recent_rounds": recent}
+    return {"recent_rounds": recent, "cost_summary": cost_summary}
 
 
 # ── HITL 人工确认节点 ────────────────────────────
@@ -633,24 +687,56 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
             "confidence_level": result.get("confidence_level", "high"),
             "reply_id": result.get("reply_id", ""),
             "duration_ms": dur,
+            "citations": result.get("citations", []),
+            "cost_summary": result.get("cost_summary"),
+            "need_human_confirm": result.get("need_human_confirm", False),
         }
     except Exception as e:
         logger.error(f"❌ Agent 执行失败: {e}", exc_info=True)
         return {"success": False, "error": str(e), "reply": "系统处理异常，请重试。"}
 
 
+# 幂等表:已处理过的 idempotency_key(防 HITL 恢复重复提交)
+_IDEMPOTENCY_DONE: set = set()
+
+
+def _idempotency_guard(idempotency_key: str) -> bool:
+    """返回 True 表示该幂等键已被处理过(应拦截)。原子性由进程内 set 保证。"""
+    if not idempotency_key:
+        return False
+    if idempotency_key in _IDEMPOTENCY_DONE:
+        return True
+    _IDEMPOTENCY_DONE.add(idempotency_key)
+    return False
+
+
 async def resume_agent(thread_id: str, decision: dict):
-    """HITL 恢复：Command(resume) 作为 input 传入（langgraph 1.2 签名）"""
+    """HITL 恢复：Command(resume) 作为 input 传入（langgraph 1.2 签名）
+
+    增加幂等保护:同一 idempotency_key 重复恢复会被拦截,不重复执行高危操作。
+    """
     graph = await _ensure_graph()
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     logger.info(f"▶ HITL 人工决策到达: thread={thread_id} action={decision.get('action')}")
+
+    # ⭐ 幂等键防重复提交(31课)
+    idempotency_key = decision.get("idempotency_key", "")
+    if _idempotency_guard(idempotency_key):
+        logger.warning(f"♻️ 幂等拦截: idempotency_key={idempotency_key} 已处理过,跳过重复提交")
+        return {"success": True, "idempotent_replay": True,
+                "reply": "该审批已完成,已忽略重复提交。"}
+
     try:
         result = await graph.ainvoke(Command(resume=decision), config=config)
         logger.info(f"✅ HITL 恢复执行完成: thread={thread_id} action={decision.get('action')}")
         return {"success": True, "reply": result.get("agent_output", ""),
-                "intent": result.get("intent", "")}
+                "intent": result.get("intent", ""),
+                "idempotency_key": idempotency_key}
     except Exception as e:
         logger.error(f"❌ HITL 恢复失败: thread={thread_id} error={str(e)[:150]}")
+        # 恢复失败:释放幂等键,允许重试
+        if idempotency_key:
+            _IDEMPOTENCY_DONE.discard(idempotency_key)
         return {"success": False, "error": str(e)}
 
 

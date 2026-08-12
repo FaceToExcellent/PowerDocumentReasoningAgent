@@ -84,6 +84,8 @@ class HumanConfirmRequest(BaseModel):
     action: str = "approve"       # approve / reject / modify
     reason: str = ""
     modified_params: dict = None
+    resume_token: str = ""        # 恢复凭证(防冒用)
+    idempotency_key: str = ""     # 幂等键(防重复提交)
 
 
 # ── 健康检查 ──────────────────────────────────────
@@ -245,6 +247,8 @@ async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_
         "confidence": final_state.get("confidence", 0),
         "fact_check_passed": final_state.get("fact_check_passed", True),
         "duration_ms": int((time.time() - state.get("start_time", time.time())) * 1000),
+        "citations": final_state.get("citations", []),
+        "cost_summary": final_state.get("cost_summary"),
     }, ensure_ascii=False))
 
 
@@ -262,9 +266,16 @@ async def abort_chat(req: ChatRequest):
 @app.post("/chat/human-confirm")
 async def human_confirm(req: HumanConfirmRequest):
     from agent.graph import resume_agent
-    result = await resume_agent(req.thread_id, {"action": req.action,
-                                                "reason": req.reason,
-                                                "modified_params": req.modified_params})
+    # ⭐ resume_token 校验:凭 thread_id 不能恢复高危操作,必须有恢复凭证
+    if req.resume_token and len(req.resume_token) < 8:
+        return {"success": False, "error": "resume_token 不合法"}
+    result = await resume_agent(
+        req.thread_id,
+        {"action": req.action, "reason": req.reason,
+         "modified_params": req.modified_params,
+         "resume_token": req.resume_token,
+         "idempotency_key": req.idempotency_key},
+    )
     return {"success": result.get("success", False), "data": result}
 
 
@@ -272,7 +283,11 @@ async def human_confirm(req: HumanConfirmRequest):
 @app.post("/chat/recover")
 async def chat_recover(req: HumanConfirmRequest):
     from agent.graph import recover_thread
-    result = await recover_thread(req.thread_id, {"action": req.action or "reject"})
+    result = await recover_thread(
+        req.thread_id,
+        {"action": req.action or "reject", "resume_token": req.resume_token,
+         "idempotency_key": req.idempotency_key},
+    )
     return {"success": result.get("success", False), "data": result}
 
 
@@ -325,3 +340,13 @@ async def get_memory(thread_id: str):
     from memory.message_store import message_store
     msgs = message_store.get_thread(tenant_id="default", user_id="", thread_id=thread_id)
     return {"success": True, "count": len(msgs), "messages": msgs}
+
+
+# ── 回归评测(证据治理层) ──────────────────────────
+@app.post("/eval/run")
+async def eval_run(body: dict = None):
+    """固定 case 回归评测 — 每次改 Prompt/检索/模型后必跑"""
+    from eval.runner import run_eval
+    case_ids = (body or {}).get("case_ids")
+    report = await run_eval(case_ids)
+    return {"code": 0, "msg": "success", "data": report}

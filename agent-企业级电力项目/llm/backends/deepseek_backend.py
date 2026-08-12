@@ -11,10 +11,17 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSeekBackend:
-    """DeepSeek v4 API。API key 从环境变量注入，代码不落盘。"""
+    """DeepSeek v4 API。API key 从环境变量注入，代码不落盘。支持 reasoner / chat 两级模型。"""
 
-    def __init__(self, model: str = "", base_url: str = "", api_key: str = ""):
-        self.model = model or settings.deepseek_reasoner_model
+    def __init__(self, model: str = "", base_url: str = "", api_key: str = "", *, kind: str = "reasoner"):
+        """kind: reasoner(默认,核心推理) / chat(轻量任务,便宜快)"""
+        self.kind = kind
+        if model:
+            self.model = model
+        else:
+            self.model = (
+                settings.deepseek_reasoner_model if kind == "reasoner" else settings.deepseek_chat_model
+            )
         self.base_url = (base_url or settings.deepseek_base_url).rstrip("/")
         self.api_key = api_key or settings.deepseek_api_key
 

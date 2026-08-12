@@ -24,9 +24,12 @@ class UnifiedLLM:
 
     def _get_backend(self, name: str):
         if name not in self._backends:
-            if name == "deepseek":
+            if name == "deepseek_reasoner":
                 from llm.backends.deepseek_backend import DeepSeekBackend
-                self._backends[name] = DeepSeekBackend()
+                self._backends[name] = DeepSeekBackend(kind="reasoner")
+            elif name == "deepseek_chat":
+                from llm.backends.deepseek_backend import DeepSeekBackend
+                self._backends[name] = DeepSeekBackend(kind="chat")
             elif name == "local_reasoning":
                 from llm.backends.local_reasoning_backend import LocalReasoningBackend
                 self._backends[name] = LocalReasoningBackend()
@@ -80,7 +83,7 @@ class UnifiedLLM:
         for i, name in enumerate(chain):
             backend = self._get_backend(name)
             try:
-                if name == "deepseek":
+                if name in ("deepseek_reasoner", "deepseek_chat"):
                     async for chunk in backend.astream_raw(messages):
                         yield {"type": "thinking" if chunk["thinking"] else "content",
                                "text": chunk["thinking"] or chunk["content"],

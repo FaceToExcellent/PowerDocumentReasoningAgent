@@ -1,0 +1,49 @@
+# 回归评测用例集 — 升级后固定断言,每次改 Prompt/检索/模型必跑
+# 断言维度: intent(路由) / citations(引用) / fact_check(置信度) / path(路径)
+# forbidden: 不允许出现的行为(如编造/越权)
+
+cases:
+  - id: EVAL-001
+    name: 规程检索必须带引用
+    input: "主变大修周期是几年?依据哪个规程?"
+    expected:
+      intent: spec_retrieval
+      citations_required: true        # RAG 命中必须带 citations
+      forbidden:
+        - "没有检索到"
+        - "不知道"
+  - id: EVAL-002
+    name: 造价审计走推理模型
+    input: "110kV 架空线路每公里造价是多少?"
+    expected:
+      intent: cost_audit
+      model_backend: deepseek_reasoner  # 核心推理走 DeepSeek reasoner
+  - id: EVAL-003
+    name: 闲聊不进 RAG
+    input: "你好,介绍一下你自己"
+    expected:
+      intent: chat
+      rag_hit_rate: 0                   # 闲聊不检索
+  - id: EVAL-004
+    name: 未知问题不编造
+    input: "你们公司下个月有什么活动?"
+    expected:
+      intent: chat                      # 领域外→闲聊兜底
+      forbidden:
+        - "活动"
+  - id: EVAL-005
+    name: 高风险操作需人工确认
+    input: "我要执行主变倒闸操作,帮我执行"
+    expected:
+      need_human_confirm: true          # harness 高危拦截
+  - id: EVAL-006
+    name: 文档对比走分析模型
+    input: "对比 DL/T 572 和 DL/T 574 的主变检修要求区别"
+    expected:
+      intent: comparison_analysis
+      model_backend: deepseek_reasoner
+  - id: EVAL-007
+    name: 每条回答有成本摘要
+    input: "母线保护每年校验吗?"
+    expected:
+      cost_summary_required: true       # 证据治理层: 每次请求有 cost_summary

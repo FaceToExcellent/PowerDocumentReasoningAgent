@@ -23,6 +23,9 @@ class AgentState(TypedDict, total=False):
     # RAG 检索
     rag_results: Optional[List[Dict]]
     rag_hit_rate: float
+    citations: Optional[List[Dict]]       # 引用依据(来源/分数/片段) — 证据治理层
+    cost_summary: Optional[Dict]          # 请求级成本摘要 — 证据治理层
+    hook_events: Optional[List[Dict]]     # Hooks 治理事件 — 能力执行层
 
     # Agent 输出
     agent_output: Optional[str]
@@ -77,6 +80,7 @@ def create_initial_state(thread_id="", user_id="", account="anonymous", employee
         tenant_id=tenant_id, reply_id="", user_input=user_input,
         intent="", routing_plan=None, next_agent=None,
         rag_results=None, rag_hit_rate=0.0,
+        citations=None, cost_summary=None,
         agent_output=None, confidence=0.0,
         fact_check_passed=True, fact_check_errors=None, fact_check_feedback=None,
         confidence_level="high",

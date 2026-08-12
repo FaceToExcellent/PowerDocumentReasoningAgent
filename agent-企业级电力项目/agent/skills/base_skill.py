@@ -10,11 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 class SkillMetadata:
-    """Skill 元数据 — 供 ToolSelector 三层筛选（权限 → 租户可见 → 语义）"""
+    """Skill 元数据 — 供 ToolSelector 三层筛选（权限 → 租户可见 → 语义）+ 工具契约"""
 
     def __init__(self, name: str, description: str, tags: List[str] = None,
                  risk_level: RiskLevel = RiskLevel.LOW, category: str = "检索",
-                 required_permission: str = "", tenant_visible: List[str] = None):
+                 required_permission: str = "", tenant_visible: List[str] = None,
+                 read_only: bool = True, required_params: List[str] = None):
         self.name = name
         self.description = description
         self.tags = tags or []
@@ -22,12 +23,15 @@ class SkillMetadata:
         self.category = category
         self.required_permission = required_permission
         self.tenant_visible = tenant_visible or []   # 空=全部租户可见
+        self.read_only = read_only                   # 工具契约:是否只读(默认 True,安全)
+        self.required_params = required_params or [] # 工具契约:必填参数
 
     def to_dict(self) -> dict:
         return {
             "name": self.name, "description": self.description, "tags": self.tags,
             "risk_level": self.risk_level.value, "category": self.category,
             "required_permission": self.required_permission,
+            "read_only": self.read_only, "required_params": self.required_params,
         }
 
 
