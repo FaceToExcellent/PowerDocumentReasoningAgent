@@ -18,9 +18,9 @@ DOMAIN=generic python main.py --port 8090
 
 **领域化设计**：意图关键词、提示词、Skill、演示文档全部在 `config/domains/<domain>.py` 配置。新领域 = 新建一个 DomainConfig 子类，底座层（LangGraph 图、记忆、HITL、多租户、SSE）零改动。
 
-## 技术栈（本机落地的企业级能力）
+## 技术栈
 
-| 层     | 技术                                                                | 本机形态                                      |
+| 层     | 技术                                                                | 部署形态                                      |
 | ------ | ------------------------------------------------------------------- | --------------------------------------------- |
 | 编排   | LangGraph（分级双路径 + HITL interrupt + 并行 fan-out）             | 纯 Python                                     |
 | 向量库 | **Milvus**（多租户分区 + expr 过滤）                                | **Milvus Lite**（进程内，`./data/milvus.db`） |
@@ -33,16 +33,16 @@ DOMAIN=generic python main.py --port 8090
 
 ## 快速启动
 
-### 0. 前置（本机已具备）
+### 0. 前置依赖
 
 - Redis（`redis-server`）
-- Ollama（`qwen2.5:7b` / `deepseek-r1:7b` 已拉）
+- Ollama（需拉取 `qwen2.5:7b` 与 `deepseek-r1:7b` 模型）
 - Python 3.12 + uv
 
 ### 1. 后端
 
 ```bash
-cd /Users/yuzhenhua/Desktop/PowerDocumentReasoningAgent/agent-企业级电力项目
+cd agent-企业级电力项目
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r <(sed -n '/dependencies/,/\]/p' pyproject.toml | grep -E '"[a-z]"' | tr -d '",')
 # 可选：配置 DeepSeek key（核心推理走云端，无 key 自动降级本地）
@@ -56,7 +56,7 @@ uv run python main.py --port 8090
 ### 2. 前端
 
 ```bash
-cd /Users/yuzhenhua/Desktop/agent-企业电力项目-vue
+cd agent-企业电力项目-vue
 npm install
 npm run dev   # http://localhost:5173（代理到 8090）
 ```
@@ -131,7 +131,7 @@ agent-企业级电力项目/
 └── db/ data/ logs/         # SQLite / 向量库 / 日志数据目录
 ```
 
-## 面试亮点（本机可演示）
+## 项目亮点
 
 1. **领域无关底座**（压轴）：这套不是电力专用系统，是**通用文档分析底座**，电力只是第一个领域验证。换领域只需换 DomainConfig + 注册 Skill，底座（记忆/HITL/多租户/SSE）全部复用——已内置 generic 领域演示证明
 2. **多租户隔离**：Milvus 分区 + expr 双保险，A 租户搜不到 B 租户
