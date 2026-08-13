@@ -13,7 +13,7 @@ DOMAIN=generic python main.py --port 8090
 
 | 领域                | 意图                    | Skills                                        | 演示文档                    |
 | ------------------- | ----------------------- | --------------------------------------------- | --------------------------- |
-| **power**（电力）   | 规程检索/造价/故障/对比 | power_rag / quota_match / comparison_analysis | DL/T 572 等 4 篇            |
+| **power**（电力）   | 规程检索/造价/故障/对比 | power_rag / quota_match / comparison_analysis / fact_check | DL/T 572 等 4 篇            |
 | **generic**（通用） | 文档问答/对比/总结      | doc_qa / doc_compare / doc_summary            | 差旅报销/请假/机房出入 3 篇 |
 
 **领域化设计**：意图关键词、提示词、Skill、演示文档全部在 `config/domains/<domain>.py` 配置。新领域 = 新建一个 DomainConfig 子类，底座层（LangGraph 图、记忆、HITL、多租户、SSE）零改动。
@@ -42,15 +42,15 @@ DOMAIN=generic python main.py --port 8090
 ### 1. 后端
 
 ```bash
-cd /Users/yuzhenhua/Desktop/agent-企业级电力项目
+cd /Users/yuzhenhua/Desktop/PowerDocumentReasoningAgent/agent-企业级电力项目
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r <(sed -n '/dependencies/,/\]/p' pyproject.toml | grep -E '"[a-z]"' | tr -d '",')
 # 可选：配置 DeepSeek key（核心推理走云端，无 key 自动降级本地）
 echo "DEEPSEEK_API_KEY=sk-xxx" >> .env
 # 灌入演示文档（可选）
-KMP_DUPLICATE_LIB_OK=TRUE .venv/bin/python scripts/seed_docs.py
-# 启动
-KMP_DUPLICATE_LIB_OK=TRUE .venv/bin/python main.py --port 8090
+uv run python main.py --seed
+# 启动（main.py 已内置 KMP_DUPLICATE_LIB_OK，无需手动加前缀）
+uv run python main.py --port 8090
 ```
 
 ### 2. 前端
@@ -65,37 +65,70 @@ npm run dev   # http://localhost:5173（代理到 8090）
 
 | 端点                                       | 说明                                                 |
 | ------------------------------------------ | ---------------------------------------------------- |
-| `POST /chat`                               | 普通对话                                             |
-| `POST /chat/stream`                        | **SSE 流式**（token_stat → thinking → reply → done） |
-| `POST /chat/abort`                         | 取消生成                                             |
-| `POST /chat/human-confirm`                 | HITL 人工确认恢复                                    |
-| `POST /docs/upload`                        | 文档上传（异步入库）                                 |
-| `GET /docs/list`                           | 文档列表                                             |
-| `GET /metrics` / `GET /metrics/prometheus` | 指标                                                 |
-| `GET /audit/chats`                         | 审计日志                                             |
-| `GET /memory/threads/{id}`                 | 记忆回溯                                             |
+| `GET /health`                             | 健康检查（Redis / 向量库 / DeepSeek 配置）          |
+| `POST /chat`                              | 普通对话                                             |
+| `POST /chat/stream`                       | **SSE 流式**（token_stat → thinking → reply → done；HITL 挂起时推 human_confirm） |
+| `POST /chat/abort`                        | 取消生成                                             |
+| `POST /chat/human-confirm`                | HITL 人工确认恢复（含 resume_token / 幂等键）        |
+| `POST /chat/recover`                      | 崩溃恢复：从 checkpoint 回放未完成线程               |
+| `POST /docs/upload`                       | 文档上传（切分入库，返回 chunk 数）                  |
+| `GET /docs/list`                          | 文档列表                                             |
+| `POST /eval/run`                          | 固定 case 回归评测（cases.yml）                      |
+| `GET /metrics` / `GET /metrics/prometheus`| 指标（后者为 Prometheus 文本格式）                   |
+| `GET /audit/chats`                        | 审计日志                                             |
+| `GET /memory/threads/{id}`                | 记忆回溯                                             |
 
 ## 目录结构
 
 ```
 agent-企业级电力项目/
-├── main.py                 # 启动入口（环境预检 + uvicorn）
+├── main.py                 # 启动入口（环境预检 Redis/Ollama/Milvus/DeepSeek + uvicorn）
+├── pyproject.toml          # 依赖声明（uv）
 ├── config/
 │   ├── settings.py         # 全局配置（含 DOMAIN 领域开关）
 │   ├── domain.py           # ★ 领域配置基类 + 工厂（领域只在配置层）
+│   ├── cache.py            # Redis 缓存（失败降级内存）
+│   ├── logging_config.py   # loguru 日志
 │   └── domains/            # ★ 领域目录：power.py / generic.py
-│       └── power.py        #   电力领域（意图词/提示词/Skills/演示文档）
+├── api/main.py             # FastAPI + sse-starlette（SSE/HITL/文档上传/评测）
 ├── agent/                  # LangGraph 主图 + Harness + Skills + 记忆
 │   ├── graph.py            # 8 节点图（领域无关，从 DomainConfig 读意图）
+│   ├── state.py            # AgentState 共享状态
+│   ├── checkpointer.py     # AsyncSqliteSaver（checkpoint / 崩溃恢复）
+│   ├── context_builder.py  # 多来源上下文构建（信任排序/冲突解决/压缩）
+│   ├── context_manager.py  # recent_rounds 短上下文
+│   ├── clarification.py    # 工具澄清（缺参数追问）
+│   ├── degradation.py      # 错误降级策略
+│   ├── fact_checker.py     # 四层幻觉抑制 + 三级置信度
+│   ├── hooks.py            # Skill 执行前后钩子（治理/脱敏）
+│   ├── rag_cache.py        # RAG 缓存（索引版本指纹）
+│   ├── data_tools.py       # SQLite 数据工具（带租户）
+│   ├── execution_log.py    # 执行日志 → 审计
 │   ├── harness/            # 风险分级 + 高危拦截 + 人工确认审计
-│   └── skills/             # 注册中心 + 动态筛选 + 领域 Skill
-├── rag/                    # Milvus 适配层（Lite/生产双模式）+ 切片
+│   ├── prompts/            # Supervisor 提示词
+│   └── skills/             # 注册中心 + 三层筛选 + 领域 Skill
+├── rag/                    # 混合检索（向量+关键词+RRF）+ 切片 + 重排
+│   ├── retriever.py        # RAGService.search 统一入口
+│   ├── doc_splitter.py     # 标题层级感知切片
+│   ├── embedder.py         # BGE-M3 embedding（MPS/懒加载/预热）
+│   ├── reranker.py         # BGE-reranker 重排（无则本地兜底）
+│   ├── query_expander.py   # 查询改写（L13）
+│   ├── metadata_filter.py  # metadata 过滤（intent/电压等级）
+│   ├── kg/entity_index.py  # 实体索引（一跳关系 → 证据）
+│   └── vector_store/       # base / milvus（多租户分区+expr）/ chroma
 ├── llm/                    # UnifiedLLM + ModelRouter（DeepSeek/本地降级）
+│   └── backends/           # deepseek / local_reasoning / local_small
 ├── memory/                 # chat_message 三 ID 表 + 按需加载
-├── gateway/                # 鉴权/限流/日志中间件
+├── gateway/                # 鉴权（APIKey/JWT）/ 限流 / 日志中间件
+├── safety/prompt_guard.py  # Prompt 注入检测（分源扫描/脱敏）
 ├── mq/                     # Redis transport 模拟 MQ（重试/死信）
-├── observability/          # 追踪 + 指标 + 审计
-└── api/main.py             # FastAPI + sse-starlette
+├── mcp_catalog/            # 从 Skill 生成 MCP 工具定义
+├── mcp_servers/            # MCP 服务
+├── observability/          # 追踪（span）/ 指标（Prometheus）/ 审计（SQLite）
+├── eval/                   # 固定 case 回归评测（cases.yml + runner）
+├── scripts/seed_docs.py    # 演示文档灌入
+├── tests/smoke_test.py     # 冒烟测试
+└── db/ data/ logs/         # SQLite / 向量库 / 日志数据目录
 ```
 
 ## 面试亮点（本机可演示）
@@ -108,3 +141,4 @@ agent-企业级电力项目/
 6. **动态 Skill 筛选**：只注入 Top-K Skill 到 Prompt，上下文精简
 7. **三级置信度**：FactCheck 区分 high/medium/low，敢说不确定
 8. **HITL**：高危操作 interrupt 挂起，人工确认后恢复
+9. **崩溃恢复 + 幂等**：checkpoint 断点回放续跑未完成线程（`/chat/recover`），HITL 恢复带幂等键防重复提交
