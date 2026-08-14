@@ -617,7 +617,8 @@ def route_after_agent(state: AgentState) -> str:
 
 # ── 并行 fan-out / 汇总（M5.5）──────────────────
 def fan_out_parallel(state: AgentState) -> list:
-    """supervisor 判定 parallel 时，把每个意图作为独立子任务分发"""
+    """supervisor 判定 parallel 时，把每个意图作为独立子任务分发；
+    其余（fast/chat）单路径走 rag_retrieve，避免空 Send 列表导致图提前 END"""
     from langgraph.types import Send
     plan = state.get("routing_plan") or {}
     intents = plan.get("intents", [])
@@ -625,6 +626,9 @@ def fan_out_parallel(state: AgentState) -> list:
     for intent in intents[:2]:
         if intent != "chat":
             sends.append(Send("rag_retrieve", {"intent": intent}))
+    # 无子任务可发（如闲聊 chat）：单路径进 rag_retrieve（内部对 chat 返回空检索）
+    if not sends:
+        return "rag_retrieve"
     return sends
 
 

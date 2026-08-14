@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("⚡ 电力智能运维 Agent v5.0（企业版）启动中…")
+    # OTel 初始化（OTLP → Jaeger/Tempo；未配后端时 BatchSpanProcessor 静默丢弃，不影响服务）
+    from observability.otel_setup import setup_otel, shutdown_otel
+    setup_otel(service_name="power-agent")
     await cache_service.connect()
     # 初始化官方 AsyncSqliteSaver + 编译图（必须在 event loop 内）
     from agent.graph import init_graph
@@ -50,6 +53,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"✅ Skills 已注册: {skill_registry.all_names()}")
     logger.info(f"✅ API 就绪: http://{settings.api_host}:{settings.api_port}")
     yield
+    from observability.otel_setup import shutdown_otel
+    shutdown_otel()
     from agent.checkpointer import close_checkpointer
     await close_checkpointer()
     logger.info("🛑 API 关闭")

@@ -1,97 +1,87 @@
-"""轻量 OpenTelemetry 风格追踪 — 本机用简单实现，生产可换 OTLP
-本机避免引入 OTel SDK 重依赖，用 contextvar 传递 TraceID + 结构化 span 记录。
+"""OpenTelemetry 追踪 — 对外保持原 API，内部换成 OTel SDK
+
+对外契约（graph/audit/gateway 的调用点零改动）：
+- tracer.span(name, **attrs)   → OTel start_as_current_span（父子自动继承，协程安全）
+- get_trace_id()               → 当前 span 的 trace_id（audit 落库 / 日志直接用）
+- set_trace_id() / new_trace_id() → 仅无 OTel 时降级用，OTel 模式下由根 span 决定
+
+未安装 OTel SDK 时自动降级：span 变成 no-op，trace_id 走 contextvar，
+保证本机在装依赖前也能跑（行为与升级前一致）。
 """
-import time
-import uuid
 import contextvars
-import logging
-from dataclasses import dataclass, field
-from typing import Optional
+import uuid
+from contextlib import contextmanager
 
-logger = logging.getLogger(__name__)
+try:
+    from opentelemetry import trace as _otel_trace
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    HAS_OTEL = True
+except ImportError:  # pragma: no cover - 依赖未装时的降级路径
+    _otel_trace = None
+    HAS_OTEL = False
 
-# 当前 TraceID / SpanID，通过 contextvar 全链路传递（协程安全）
-_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
-_span_stack: contextvars.ContextVar[list] = contextvars.ContextVar("span_stack", default=[])
+# 无 OTel 时的手动 TraceID 透传（与升级前行为一致）
+_manual_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
 
 
-@dataclass
-class Span:
-    name: str
-    start: float
-    attrs: dict = field(default_factory=dict)
-    parent: Optional["Span"] = None
-    children: list = field(default_factory=list)
-    duration_ms: float = 0.0
+class _NoopSpan:
+    """OTel 缺失时的 no-op span，兼容 `with tracer.span(...)` 语法"""
 
-    def finish(self):
-        self.duration_ms = (time.time() - self.start) * 1000
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 class Tracer:
-    """极简 Tracer：管理 TraceID 和 span 栈"""
-
-    def start_span(self, name: str, **attrs) -> Span:
-        stack = list(_span_stack.get())
-        parent = stack[-1] if stack else None
-        span = Span(name=name, start=time.time(), attrs=attrs, parent=parent)
-        if parent is not None:
-            parent.children.append(span)
-        stack.append(span)
-        _span_stack.set(stack)
-        return span
-
-    def end_span(self, span: Span):
-        span.finish()
-        stack = list(_span_stack.get())
-        if stack and stack[-1] is span:
-            stack.pop()
-            _span_stack.set(stack)
-        # 根 span 结束时打印一条链路摘要
-        if span.parent is None and span.duration_ms > 50:
-            logger.debug(f"[trace:{get_trace_id()}] {span.name} {span.duration_ms:.0f}ms "
-                         f"attrs={span.attrs} children={len(span.children)}")
+    """保持旧 API：tracer.span(name, **attrs)"""
 
     def span(self, name: str, **attrs):
-        """context manager 用法"""
-        class _Ctx:
-            def __enter__(self):
-                self.span = tracer.start_span(name, **attrs)
-                return self.span
-            def __exit__(self, *exc):
-                tracer.end_span(self.span)
-        return _Ctx()
-
-    def get_current_span(self) -> Optional[Span]:
-        stack = _span_stack.get()
-        return stack[-1] if stack else None
+        if not HAS_OTEL:
+            return _NoopSpan()
+        return _otel_trace.get_tracer("power-agent").start_as_current_span(
+            name, attributes=attrs or None)
 
 
 tracer = Tracer()
 
 
-def new_trace_id() -> str:
-    """生成新 TraceID"""
-    return uuid.uuid4().hex[:16]
-
-
-def set_trace_id(tid: str):
-    _trace_id.set(tid)
-
-
 def get_trace_id() -> str:
-    return _trace_id.get() or ""
+    if not HAS_OTEL:
+        return _manual_trace_id.get()
+    ctx = _otel_trace.get_current_span().get_span_context()
+    if not ctx.is_valid:
+        return ""
+    return format(ctx.trace_id, "032x")
 
 
-def trace_middleware_factory(app=None):
-    """FastAPI 中间件：为每个请求生成 TraceID 并注入响应头"""
-    from fastapi import Request
+def set_trace_id(tid: str) -> None:
+    """OTel 模式下由根 span 决定 trace_id，此函数仅用于降级路径。"""
+    _manual_trace_id.set(tid)
 
-    async def middleware(request: Request, call_next):
-        incoming = request.headers.get("X-Trace-ID", "")
-        set_trace_id(incoming or new_trace_id())
-        with tracer.span("http_request", path=request.url.path, method=request.method):
-            response = await call_next(request)
-        response.headers["X-Trace-ID"] = get_trace_id()
-        return response
-    return middleware
+
+def new_trace_id() -> str:
+    return uuid.uuid4().hex
+
+
+def request_span(request, **attrs):
+    """为一次 HTTP 请求创建 OTel 根 span。
+
+    - 入站带 W3C `traceparent` → 作为父上下文（跨服务串联）
+    - 入站只有旧 `X-Trace-ID` → 桥接成 traceparent，保持连续
+    - 都没有 → 新开一条 trace
+    """
+    if not HAS_OTEL:
+        return _NoopSpan()
+    carrier = {k.lower(): v for k, v in request.headers.items()}
+    if "traceparent" not in carrier and "x-trace-id" in carrier:
+        carrier["traceparent"] = _legacy_to_traceparent(carrier["x-trace-id"])
+    ctx = TraceContextTextMapPropagator().extract(carrier)
+    return _otel_trace.get_tracer("power-agent").start_as_current_span(
+        "http_request", context=ctx, attributes=attrs or None)
+
+
+def _legacy_to_traceparent(tid: str) -> str:
+    """旧 X-Trace-ID(<=16 hex) → W3C traceparent 格式，span_id 用占位。"""
+    return f"00-{tid:0>32}-0000000000000001-01"

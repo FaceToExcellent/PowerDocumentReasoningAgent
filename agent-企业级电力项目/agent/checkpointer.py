@@ -34,6 +34,8 @@ async def init_checkpointer() -> AsyncSqliteSaver:
         Path(settings.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(settings.checkpoint_db)
         checkpointer = AsyncSqliteSaver(conn)
+        # 立即建 schema：避免懒初始化遇到旧库/空库时中途抛 no such column 类错误
+        await checkpointer.setup()
         logger.info(f"✅ 官方 AsyncSqliteSaver 就绪: {settings.checkpoint_db}")
     return checkpointer
 
