@@ -33,7 +33,7 @@ class DomainConfig(ABC):
         """意图 → 主 Skill 名（供 agent_execute 用）；子类可覆盖"""
         return ""
 
-    # ⭐ Prompt Registry(L06):把意图提示词片段化,带版本,支持按意图选择
+    # ⭐ Prompt Registry:把意图提示词片段化,带版本,支持按意图选择
     @property
     def prompt_registry(self) -> Dict:
         """返回结构化 Prompt 注册表:片段ID/优先级/适用意图/内容 + 版本指纹。"""
@@ -58,7 +58,7 @@ class DomainConfig(ABC):
 
     # 按意图挑选启用的 Prompt 片段，未匹配时回退到 chat 或第一个片段
     def select_prompt_fragments(self, intent: str) -> List[Dict]:
-        """按意图选择 Prompt 片段(对齐课程 select_prompt_fragments)。"""
+        """按意图选择 Prompt 片段。"""
         reg = self.prompt_registry
         selected = [f for f in reg["fragments"]
                     if f["enabled"] and intent in f["applies_to"]]

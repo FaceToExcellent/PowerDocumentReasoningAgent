@@ -21,7 +21,7 @@ class RAGCacheManager:
         # 进程内版本缓存(避免每请求读 Redis)
         self._version_cache: dict = {}
 
-    # ── 索引版本指纹(L16):知识内容变 → fingerprint 变 → 缓存 key 变 → 旧缓存失效 ──
+    # ── 索引版本指纹:知识内容变 → fingerprint 变 → 缓存 key 变 → 旧缓存失效 ──
     async def compute_index_fingerprint(self, tenant_id: str = "") -> str:
         """从向量库文档内容计算知识版本指纹(内容哈希)。文档变更指纹即变。"""
         try:

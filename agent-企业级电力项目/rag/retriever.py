@@ -1,5 +1,5 @@
 """RAG 统一检索服务 — 工厂模式：Milvus / Chroma 一行切换，接口兼容
-Hybrid RAG(L15):向量召回(dense)+ 关键词召回(BM25直觉)+ RRF 融合
+Hybrid RAG：向量召回(dense)+ 关键词召回(BM25直觉)+ RRF 融合
 """
 import logging
 import math

@@ -1,6 +1,5 @@
 """错误分类与降级决策 — error_category 8 类枚举 + degradation_policy
 
-对齐课程错误降级(21课):
 - error_category 8 类:timeout/validation_error/not_found/forbidden/business_error/
   model_unavailable/system_error/high_risk_write_blocked
 - degradation_policy:决策层定 next_action,fallback 话术层定口径

@@ -1,6 +1,6 @@
 """MCP 工具目录 — 把 Skill 注册中心的能力标准化为 MCP Tool 定义
 
-对齐课程 MCP(24课):MCP 解决"能力从哪里来",Skill 解决"本轮怎么执行"。
+MCP 解决"能力从哪里来",Skill 解决"本轮怎么执行"。
 MCPCatalog 统一列出工具/Resource/Prompt 三类能力,带 read_only/risk_level/resource_uris/prompt_ids。
 不替代 Hooks 治理、不替代 Workflow/HITL。
 """

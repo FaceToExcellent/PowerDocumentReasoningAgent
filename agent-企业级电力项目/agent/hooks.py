@@ -1,6 +1,6 @@
 """Hooks 治理层 — Skill 生命周期统一治理点(pre/post/error/completion)
 
-对齐课程 Hooks(23课):把参数校验、脱敏、降级、审计从每个 Skill 里抽出来统一管理。
+把参数校验、脱敏、降级、审计从每个 Skill 里抽出来统一管理。
 不改变 Skill 业务,只收口治理动作。
 """
 import logging
@@ -75,12 +75,12 @@ class SkillHooks:
         self.events.append(event)
         return event
 
-    # ── post_tool_call:结果脱敏 + 摘要 + omitted_fields 字段裁剪(L20) ──
+    # ── post_tool_call:结果脱敏 + 摘要 + omitted_fields 字段裁剪 ──
     def post_tool_call(self, skill_name: str, result: Dict[str, Any]) -> HookEvent:
         output = str(result.get("result") or result.get("output") or "")
         safe_output = self.redact(output)
         redacted = safe_output != output
-        # ⭐ Observation 治理(L20):记录省略的内部字段,只留摘要进模型
+        # ⭐ Observation 治理:记录省略的内部字段,只留摘要进模型
         omitted_fields = self._collect_omitted(result)
         event = HookEvent(
             hook_type="post_tool_call", target_name=skill_name,

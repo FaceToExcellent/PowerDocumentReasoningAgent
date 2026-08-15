@@ -79,7 +79,7 @@ AGENT_RETRY_POLICY = RetryPolicy(
     max_attempts=3,          # 含首次，共 3 次尝试
     initial_interval=1.0,    # 首次重试前等待 1s
     backoff_factor=2.0,      # 指数退避：1s → 2s → 4s
-    max_interval=30.0,
+    max_interval=30.0,        # 最大重试间隔 30s
     jitter=True,             # 加随机抖动，避免重试风暴
     retry_on=_retryable,
 )
@@ -117,7 +117,7 @@ async def cache_check_node(state: AgentState) -> dict:
     return {"cache_hit": False}
 
 
-# 根据用户输入关键词打分,返回得分最高的意图
+# 根据用户输入关键词打分,返回得分最高的意图 此时的state['intent']还是空的，要先赋值 才能找缓存key 
 def _guess_intent(user_input: str) -> str:
     scores = {}
     for intent, kws in INTENT_KEYWORDS.items():
@@ -132,7 +132,7 @@ async def supervisor_node(state: AgentState) -> dict:
     user_input = state.get("user_input", "")
     tenant = state.get("tenant_id", "default")
 
-    # ⭐ Prompt 注入防护(L36):扫描用户输入,识别越权/索要系统信息
+    # ⭐ Prompt 注入防护:扫描用户输入,识别越权/索要系统信息
     from safety.prompt_guard import scan_external_text, ExternalText
     safety_scan = scan_external_text(ExternalText("user", user_input))
     state["security_events"] = list(state.get("security_events") or [])
@@ -290,7 +290,7 @@ async def agent_execute_node(state: AgentState) -> dict:
     # ⭐ KG 关系证据：从用户输入抽实体 → 查一跳关系 → 拼入证据（复杂推理）
     kg_evidence = _build_kg_evidence(user_input)
 
-    # ⭐ Runtime Context 双通道(L33):trusted_for_model 模型可见 / system_only 系统校验
+    # ⭐ Runtime Context 双通道:trusted_for_model 模型可见 / system_only 系统校验
     from agent.context_builder import build_runtime_context_view
     rt_view = build_runtime_context_view(
         tenant_id=tenant, user_id=user_id, nickname=state.get("account", ""),
@@ -299,7 +299,7 @@ async def agent_execute_node(state: AgentState) -> dict:
     )
     state["runtime_context_view"] = rt_view
 
-    # ⭐ Context Builder：多来源按 trust_level 排序 + 冲突解决(34课)
+    # ⭐ Context Builder：多来源按 trust_level 排序 + 冲突解决
     from agent.context_builder import ContextBuilder
     cb = ContextBuilder()
     cb.add("runtime_context", f"tenant_id={tenant} user_id={user_id}", key="runtime_identity")
@@ -322,7 +322,7 @@ async def agent_execute_node(state: AgentState) -> dict:
         cb.add("hitl_state", f"高危操作已挂起等待人工审批：{state['confirm_payload']}",
                key="hitl_pending")
     cb.resolve_conflicts()
-    # ⭐ 上下文压缩(L35):保护高信任项,折叠低相关历史
+    # ⭐ 上下文压缩:保护高信任项,折叠低相关历史
     comp_report = cb.compress(max_items=getattr(settings, "max_recent_rounds", 8))
     state["context_compression"] = comp_report
     built_context = cb.render()
@@ -333,7 +333,7 @@ async def agent_execute_node(state: AgentState) -> dict:
     # 选择 task 名（核心推理 vs 轻量）：领域有该意图就用领域意图，否则 chat
     task = intent if intent in _INTENT_TO_SKILL and intent != "chat" else "chat"
 
-    # ⭐ 工具澄清(L19):对比分析缺第二个对象时先追问,不猜测执行
+    # ⭐ 工具澄清:对比分析缺第二个对象时先追问,不猜测执行
     if intent == "comparison_analysis":
         from agent.clarification import pre_tool_clarification
         from agent.skills.comparison_skill import ComparisonAnalysisSkill
@@ -395,7 +395,7 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     from agent.hooks import SkillHooks
     hooks = SkillHooks()
     hooks.pre_tool_call("comparison_analysis", skill.metadata, {"query": user_input})
-    # ⭐ Tool Calling 记录(L18):记录 skill 调用为 tool_call(名称/参数/观察)
+    # ⭐ Tool Calling 记录:记录 skill 调用为 tool_call(名称/参数/观察)
     state["tool_calls"] = list(state.get("tool_calls") or [])
     state["tool_calls"].append({
         "tool_name": "comparison_analysis",
@@ -635,7 +635,7 @@ def route_after_agent(state: AgentState) -> str:
     return "fact_check"
 
 
-# ── 并行 fan-out / 汇总（M5.5）──────────────────
+# ── 并行 fan-out / 汇总──────────────────
 def fan_out_parallel(state: AgentState) -> list:
     """supervisor 判定 parallel 时，把每个意图作为独立子任务分发；
     其余（fast/chat）单路径走 rag_retrieve，避免空 Send 列表导致图提前 END"""
@@ -809,7 +809,7 @@ async def resume_agent(thread_id: str, decision: dict):
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     logger.info(f"▶ HITL 人工决策到达: thread={thread_id} action={decision.get('action')}")
 
-    # ⭐ 幂等键防重复提交(31课)
+    # ⭐ 幂等键防重复提交
     idempotency_key = decision.get("idempotency_key", "")
     if _idempotency_guard(idempotency_key):
         logger.warning(f"♻️ 幂等拦截: idempotency_key={idempotency_key} 已处理过,跳过重复提交")

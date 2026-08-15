@@ -48,7 +48,7 @@ class AgentState(TypedDict, total=False):
     human_action: Optional[str]
     human_approved: bool               # 人工确认后放行标记，避免二次拦截
 
-    # 工具澄清(19课)
+    # 工具澄清
     need_clarification: bool
     clarification: Optional[Dict]
 
@@ -71,7 +71,7 @@ class AgentState(TypedDict, total=False):
     context_summary: Optional[str]
     recent_rounds: List[Dict]
 
-    # 并行子任务结果（M5.5）
+    # 并行子任务结果
     sub_results: Annotated[List[Dict], operator.add]
 
     # 安全

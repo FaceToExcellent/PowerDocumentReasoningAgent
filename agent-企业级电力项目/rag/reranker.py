@@ -1,6 +1,6 @@
 """重排器 — cross-encoder 精排(可选) + 本地规则兜底
 
-对齐课程 Reranker(14课):对初召回候选重新排序,用交叉编码器成对判断"谁更适合当前问题"。
+对初召回候选重新排序,用交叉编码器成对判断"谁更适合当前问题"。
 - 有 cross-encoder 模型 → 精排(BAAI/bge-reranker-base)
 - 无模型/失败 → 本地规则兜底(关键词/来源加分)
 分数分层:vector_score(初召回)/ rerank_score(精排)分离,rerank_reasons 可解释。

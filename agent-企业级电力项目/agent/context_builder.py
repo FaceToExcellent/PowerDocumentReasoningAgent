@@ -1,6 +1,6 @@
 """上下文构建器 — 多来源上下文按 trust_level 排序 + 冲突解决
 
-对齐课程 Context Builder(34课):把用户文本/记忆/检索/KG/HITL状态统一收口,
+把用户文本/记忆/检索/KG/HITL状态统一收口,
 按信任优先级决定"听谁的",冲突留下公开说明。
 
 trust_level 优先级(高→低):
@@ -95,7 +95,7 @@ class ContextBuilder:
             blocks.append(f"[{item.source_type}]\n{item.content}")
         return "\n\n".join(blocks)
 
-    # ── 上下文压缩(L35):Protected Context 不可压 + 低相关折叠摘要 ──
+    # ── 上下文压缩:Protected Context 不可压 + 低相关折叠摘要 ──
     def compress(self, budget_tokens: int = 0, max_items: int = 12) -> Dict[str, Any]:
         """压缩上下文:保护高信任项(runtime/hitl/tool),折叠低相关历史为摘要。
 
@@ -128,7 +128,7 @@ def build_runtime_context_view(*, tenant_id: str = "", user_id: str = "",
                                nickname: str = "", member_level: str = "",
                                page_context: Dict[str, Any] | None = None,
                                risk_level: str = "", permissions: list = None) -> Dict[str, Any]:
-    """构建 Runtime Context 双通道视图(L33):
+    """构建 Runtime Context 双通道视图:
     - trusted_for_model:模型可见(昵称/会员等级/页面线索)
     - system_only:系统校验专用(user_id/风险/权限),不进模型
     用户自述不能覆盖系统事实,冲突留说明。

@@ -1,6 +1,5 @@
 """Prompt 注入防护 — 外部文本分源扫描 + 中和 + 脱敏 + 数据边界
 
-对齐课程 Prompt Injection 防御(36课):
 - ExternalText 分源(user/tool/rag),各自扫描
 - scan_categories 三类风险:prompt_injection / secret_or_reasoning_request / privacy
 - 风险分级处理:脏指令中和、隐私脱敏、系统信息请求拒绝

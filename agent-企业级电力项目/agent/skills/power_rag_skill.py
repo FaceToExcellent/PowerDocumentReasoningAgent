@@ -39,7 +39,7 @@ class PowerRAGSkill(BaseSkill):
                 "score": round(it.get("score", 0), 3),
             } for it in results]
             confidence = min(0.9, len(docs) / max(top_k, 1))
-            # ⭐ 低置信兜底(L12):命中不足或分数过低 → 明确回退,不硬答
+            # ⭐ 低置信兜底:命中不足或分数过低 → 明确回退,不硬答
             if confidence < 0.2 or not docs:
                 return {
                     "success": True,
