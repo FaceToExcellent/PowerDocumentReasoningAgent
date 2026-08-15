@@ -260,7 +260,6 @@ async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_
     yield ServerSentEvent(event="done", data=json.dumps({
         "reply": final_state.get("agent_output", ""),
         "intent": final_state.get("intent", ""),
-        "confidence": final_state.get("confidence", 0),
         "fact_check_passed": final_state.get("fact_check_passed", True),
         "duration_ms": int((time.time() - state.get("start_time", time.time())) * 1000),
         "citations": final_state.get("citations", []),

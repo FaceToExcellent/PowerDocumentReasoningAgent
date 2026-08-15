@@ -303,8 +303,12 @@ async def agent_execute_node(state: AgentState) -> dict:
     # ⭐ Runtime Context 双通道:trusted_for_model 模型可见 / system_only 系统校验
     from agent.context_builder import build_runtime_context_view
     rt_view = build_runtime_context_view(
-        tenant_id=tenant, user_id=user_id, nickname=state.get("account", ""),
-        member_level="", page_context={}, risk_level="",
+        tenant_id=tenant, 
+        user_id=user_id, 
+        nickname=state.get("account", ""),
+        member_level="", 
+        page_context={}, 
+        risk_level="",
         permissions=[],
     )
     state["runtime_context_view"] = rt_view
@@ -332,6 +336,7 @@ async def agent_execute_node(state: AgentState) -> dict:
         cb.add("hitl_state", f"高危操作已挂起等待人工审批：{state['confirm_payload']}",
                key="hitl_pending")
     cb.resolve_conflicts()
+    
     # ⭐ 上下文压缩:保护高信任项,折叠低相关历史
     comp_report = cb.compress(max_items=getattr(settings, "max_recent_rounds", 8))
     state["context_compression"] = comp_report
@@ -480,8 +485,14 @@ async def fact_check_node(state: AgentState) -> dict:
         return {"fact_check_passed": True, "confidence_level": "high",
                 "fact_check_errors": [], "fact_check_feedback": None}
     try:
+        # 传入真实检索上下文,置信度才能反映"检索覆盖 + 引用/接地"
         result = await asyncio.wait_for(
-            asyncio.to_thread(check_output, output, {"intent": intent}), timeout=5)
+            asyncio.to_thread(check_output, output, {
+                "intent": intent,
+                "rag_results": state.get("rag_results"),
+                "citations": state.get("citations"),
+                "rag_hit_rate": state.get("rag_hit_rate", 0.0),
+            }), timeout=5)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         return {"fact_check_passed": True, "confidence_level": "high",
                 "fact_check_errors": [], "fact_check_feedback": None}
@@ -489,6 +500,19 @@ async def fact_check_node(state: AgentState) -> dict:
         logger.warning(f"FactCheck 失败（默认通过）: {e}")
         return {"fact_check_passed": True, "confidence_level": "high",
                 "fact_check_errors": [], "fact_check_feedback": None}
+
+    # ⭐ 决策动作:低置信且无依据的具体断言 → 拒答(不硬答)
+    if result.get("confidence") == "low" and intent != "chat" and output.strip():
+        logger.info(f"⚠️ 低置信无依据,转为拒答: thread={state.get('thread_id')} intent={intent}")
+        output = "抱歉，知识库中未找到相关依据，无法给出确切结论。建议查阅相关规程文档或联系运维人员核实。"
+        return {
+            "agent_output": output,
+            "fact_check_passed": True,
+            "fact_check_errors": result.get("errors", []),
+            "fact_check_feedback": result.get("feedback"),
+            "confidence_level": "low",
+        }
+
     return {
         "fact_check_passed": bool(result.get("passed")),
         "fact_check_errors": result.get("errors", []),
@@ -506,22 +530,26 @@ async def memory_write_node(state: AgentState) -> dict:
     user_input = state.get("user_input", "")
     output = state.get("agent_output", "")
 
+    # 写入用户输入
     await memory_manager.record(tenant_id=tenant, user_id=user_id, thread_id=thread_id,
                                 reply_id=reply_id, role="user", content=user_input,
                                 intent=state.get("intent", ""))
+    # 写入助手回复
     await memory_manager.record(tenant_id=tenant, user_id=user_id, thread_id=thread_id,
                                 reply_id=reply_id, role="assistant", content=output,
                                 intent=state.get("intent", ""))
 
-    # 写 RAG 缓存(带索引版本,知识更新自动失效 — L16)
-    index_version = await rag_cache.get_index_version(tenant_id=tenant)
-    key = rag_cache.build_cache_key(user_input, state.get("intent", ""),
-                                    tenant_id=tenant, index_version=index_version)
-    await rag_cache.set(key, {
-        "agent_output": output, "confidence": state.get("confidence", 0.0),
-        "rag_results": state.get("rag_results"),
-        "index_version": index_version,
-    })
+    # 写 RAG 缓存(带索引版本,知识更新自动失效);低置信不缓存,避免污染
+    index_version = ""
+    if state.get("confidence_level") != "low":
+        index_version = await rag_cache.get_index_version(tenant_id=tenant)
+        key = rag_cache.build_cache_key(user_input, state.get("intent", ""),
+                                        tenant_id=tenant, index_version=index_version)
+        await rag_cache.set(key, {
+            "agent_output": output, "confidence": state.get("confidence", 0.0),
+            "rag_results": state.get("rag_results"),
+            "index_version": index_version,
+        })
     return {"reply_id": reply_id, "index_version": index_version}
 
 
@@ -532,8 +560,8 @@ async def execution_log_node(state: AgentState) -> dict:
 
     # ⭐ 构建请求级 cost_summary(证据治理层:模型/路径/token 估算/来源数)
     primary_backend = model_router.route(intent if intent != "chat" else "chat")
-    est_prompt = int(len(state.get("user_input", "")) / 2 + len(output) / 2)
-    est_total = int(len(output) / 2)
+    est_prompt = int(len(state.get("user_input", "")) / 2 + len(output) / 2) # 估算 prompt token 数(每个字符 2 个 token)
+    est_total = int(len(output) / 2) # 估算 token 数(每个字符 2 个 token)
     cost_summary = {
         "path": "rag" if state.get("rag_results") else ("cache" if state.get("cache_hit") else "direct"),
         "model_backend": primary_backend,

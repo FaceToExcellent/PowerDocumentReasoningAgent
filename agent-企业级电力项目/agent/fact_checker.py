@@ -22,7 +22,10 @@ _KEY_ENTITIES = ["主变", "母线", "变压器", "断路器", "熔断器", "互
 
 # 四层校验输出幻觉,返回通过/置信度/反馈
 def check_output(output: str, context: Dict = None) -> Dict[str, Any]:
-    """返回 {"passed": bool, "errors": [...], "confidence": level, "feedback": str}"""
+    """返回 {"passed": bool, "errors": [...], "confidence": level, "feedback": str}
+
+    置信度 = 检索覆盖度(rag_hit_rate) + 引用/证据支撑(citations/rag_results) + 事实校验。
+    """
     context = context or {}
     errors = []
     confidence = ConfidenceLevel.HIGH
@@ -32,18 +35,24 @@ def check_output(output: str, context: Dict = None) -> Dict[str, Any]:
         return {"passed": True, "errors": [], "confidence": ConfidenceLevel.LOW.value,
                 "feedback": "输出过短", "needs_review": True}
 
-    # 2. 无证据信号检测：输出含具体数值/具体规程，但无来源引用 → 提示
-    if _has_specific_claims(output) and "DL/T" not in output and "规程" not in output:
-        errors.append({"severity": "WARN", "description": "回答含具体结论但未引用来源",
-                       "suggestion": "补充依据的规程/台账条款"})
-        confidence = ConfidenceLevel.MEDIUM
-
-    # 3. 实体覆盖率（与上下文证据对比）—— 本机简化：无证据时提示
     rag_results = context.get("rag_results") or []
-    if not rag_results and confidence == ConfidenceLevel.HIGH:
+    citations = context.get("citations") or []
+    rag_hit_rate = float(context.get("rag_hit_rate") or 0.0)
+    has_evidence = bool(rag_results) or bool(citations)
+
+    # 2. 具体断言但无证据支撑 → 低置信（决策层据此拒答）
+    if _has_specific_claims(output) and not has_evidence:
+        errors.append({"severity": "WARN", "description": "回答含具体结论但无检索依据支撑",
+                       "suggestion": "补充依据的规程/台账条款,或明确拒答"})
+        confidence = ConfidenceLevel.LOW
+
+    # 3. 有证据但检索覆盖不足(命中率低)→ 中置信
+    elif has_evidence and 0 < rag_hit_rate < 0.5:
+        errors.append({"severity": "WARN", "description": "检索命中率偏低,结论依据不充分",
+                       "suggestion": "补充更多来源或标注为推演"})
         confidence = ConfidenceLevel.MEDIUM
 
-    # 4. 明确的推测语料检测：出现"可能/推测/大概" → 降低置信度（这是好事，标注了不确定）
+    # 4. 推测语料 → 中置信(标注不确定,是好事)
     if re.search(r"(可能|推测|大概|估计|建议核实)", output):
         confidence = ConfidenceLevel.MEDIUM
 
