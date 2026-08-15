@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI):
     # 初始化官方 AsyncSqliteSaver + 编译图（必须在 event loop 内）
     from agent.graph import init_graph
     await init_graph()
+    # KG 种子:空库时灌入人工维护的三元组基线,避免 _build_kg_evidence 空转
+    from rag.kg.entity_index import entity_index
+    entity_index.seed()
     # 预热 RAG 向量库 + 注册 Skills
     try:
         from rag.retriever import rag_service

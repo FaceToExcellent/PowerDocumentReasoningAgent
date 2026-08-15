@@ -148,5 +148,15 @@ class EntityIndex:
         except Exception:
             return 0
 
+    # 空库时灌入种子三元组(人工维护基线),避免 KG 空转
+    def seed(self, force: bool = False) -> int:
+        """空库时灌入种子三元组;force=True 强制覆盖。返回写入条数。"""
+        if not self._graph_store:
+            return 0
+        if force or self.count() == 0:
+            from rag.kg.seed_data import POWER_TRIPLETS
+            return self.add_triplets(POWER_TRIPLETS)
+        return 0
+
 
 entity_index = EntityIndex()
