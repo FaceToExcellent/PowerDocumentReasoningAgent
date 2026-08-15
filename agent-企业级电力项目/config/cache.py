@@ -75,6 +75,27 @@ class CacheService:
         else:
             self._memory.pop(key, None)
 
+    async def setnx(self, key: str, value: Any, ttl: int = None) -> bool:
+        """仅当 key 不存在时写入,返回是否写入成功（用于幂等/去重）。"""
+        ttl = ttl or self.default_ttl
+        if self.redis:
+            try:
+                ok = await self.redis.set(
+                    key, json.dumps(value, ensure_ascii=False, default=str),
+                    ex=ttl, nx=True)
+                return bool(ok)
+            except Exception as e:
+                logger.error(f"setnx 失败 [{key}]: {e}")
+                return False
+        # 内存降级：近似 setnx
+        import time
+        now = time.time()
+        item = self._memory.get(key)
+        if item and (item["expire"] == 0 or item["expire"] > now):
+            return False
+        self._memory[key] = {"value": value, "expire": now + ttl if ttl else 0}
+        return True
+
     # 原子自增计数（限流用），Redis 不可用时用内存计数
     async def incr(self, key: str, amount: int = 1) -> int:
         """原子自增（限流用）。Redis 不可用时用内存计数。"""

@@ -4,6 +4,7 @@
 """
 import asyncio
 import contextvars
+import json
 import time
 import uuid
 import logging
@@ -23,7 +24,7 @@ from config.settings import settings
 from config.cache import cache_service
 from observability.metrics import metrics
 from observability.audit import audit_logger
-from observability.tracing import tracer
+from observability.tracing import tracer, get_trace_id
 from memory.manager import memory_manager
 from llm.adapter import unified_llm
 from llm.model_router import model_router
@@ -335,6 +336,12 @@ async def agent_execute_node(state: AgentState) -> dict:
     if state.get("need_human_confirm") and state.get("confirm_payload"):
         cb.add("hitl_state", f"高危操作已挂起等待人工审批：{state['confirm_payload']}",
                key="hitl_pending")
+    # ⭐ HITL modify:人工修改后的执行参数,以高信任系统规则注入
+    approved_params = state.get("approved_params")
+    if approved_params:
+        cb.add("system_rules",
+               f"人工确认后修改的执行参数：{json.dumps(approved_params, ensure_ascii=False)}，请按修改后的参数执行。",
+               key="approved_params", priority=2)
     cb.resolve_conflicts()
     
     # ⭐ 上下文压缩:保护高信任项,折叠低相关历史
@@ -417,8 +424,10 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
         "arguments": {"query": user_input, "tenant_id": tenant},
         "observation_summary": "对比分析 Skill 执行",
     })
-    result = await skill.run({"query": user_input, "tenant_id": tenant,
-                              "user_context": {"tenant_id": tenant}})
+    ctx = {"query": user_input, "tenant_id": tenant, "user_context": {"tenant_id": tenant}}
+    if state.get("approved_params"):
+        ctx["approved_params"] = state.get("approved_params")
+    result = await skill.run(ctx)
     hooks.post_tool_call("comparison_analysis", result)
     if not result.get("success"):
         hooks.on_error("comparison_analysis", Exception(result.get("error", "skill failed")))
@@ -603,23 +612,30 @@ async def execution_log_node(state: AgentState) -> dict:
 
 
 # ── HITL 人工确认节点 ────────────────────────────
-def hitl_review_node(state: AgentState) -> dict:
+async def hitl_review_node(state: AgentState) -> dict:
     """高危操作：interrupt 挂起，外部 Command(resume) 恢复"""
+    thread_id = state.get("thread_id", "")
     payload = state.get("confirm_payload") or {}
+    resume_token = payload.get("resume_token") or f"rt-{uuid.uuid4().hex[:16]}"
+    idem_key = payload.get("idempotency_key") or ""
     review_data = {
         "type": "human_confirm",
-        "thread_id": state.get("thread_id", ""),
+        "thread_id": thread_id,
         "intent": state.get("intent", ""),
         "title": payload.get("title", f"高危操作确认：{state.get('intent', '')}"),
         "description": payload.get("description", ""),
         "params": payload.get("params", {}),
         "risk_level": payload.get("risk_level", "high"),
         "options": payload.get("options", ["确认执行", "驳回操作", "修改参数后执行"]),
+        "resume_token": resume_token,
+        "idempotency_key": idem_key,
     }
+    # ⭐ resume_token 落盘:仅此 thread 可用此凭证恢复(防冒用)
+    await cache_service.set(f"hitl:resume:{thread_id}", resume_token, ttl=settings.hitl_resume_ttl)
     decision = interrupt(review_data)
     action = decision.get("action", "") if isinstance(decision, dict) else str(decision or "")
     audit_logger.log_human(
-        thread_id=state.get("thread_id", ""), user_id=state.get("user_id", ""),
+        thread_id=thread_id, user_id=state.get("user_id", ""),
         skill_name=state.get("intent", ""),
         risk_level=review_data["risk_level"],
         action=action, params=decision if isinstance(decision, dict) else {"action": action},
@@ -627,22 +643,99 @@ def hitl_review_node(state: AgentState) -> dict:
     result = {
         "human_intervened": True,
         "human_action": action,
-        "human_approved": action == "approve",
-        # approve 后放行继续执行；reject/modify 由下游路由决定
+        "human_approved": action in ("approve", "modify"),
         "need_human_confirm": False,
         "confirm_payload": None,
     }
-    if action != "approve":
+    if action == "modify":
+        result["approved_params"] = decision.get("modified_params") if isinstance(decision, dict) else None
+    if action not in ("approve", "modify"):
         result["agent_output"] = "操作已被人工驳回，未执行。"
     return result
 
 
-# 人工确认后路由:approve 回 agent_execute,否则直接 memory_write 结束
+# 人工确认后路由:approve/modify 回 agent_execute,否则直接 memory_write 结束
 def route_after_hitl(state: AgentState) -> str:
-    """人工确认后：approve → 回到 agent_execute 继续执行；否则直接结束"""
-    if state.get("human_action") == "approve":
+    """人工确认后：approve/modify → 回到 agent_execute 继续执行；否则直接结束"""
+    if state.get("human_action") in ("approve", "modify"):
         return "agent_execute"
     return "memory_write"
+
+
+# ── 外部审批节点(CRITICAL 高危操作:提交审批系统,等待回调)──
+async def external_approval_node(state: AgentState) -> dict:
+    """CRITICAL 高危操作：提交外部审批系统 → 落盘审批单 → interrupt 挂起，
+    审批回调 resume 后继续执行。"""
+    thread_id = state.get("thread_id", "")
+    user_id = state.get("user_id", state.get("account", ""))
+    skill_name = state.get("intent", "")
+    payload = state.get("confirm_payload") or {}
+    trace_id = get_trace_id() or ""
+    creds = harness_interceptor._gen_credentials(thread_id, skill_name, payload.get("params") or {})
+    resume_token = creds["resume_token"]
+    idem_key = creds["idempotency_key"]
+
+    # 1. 提交外部审批系统,拿审批单号
+    approval_id = ""
+    if settings.approval_external_endpoint:
+        try:
+            import httpx
+            with tracer.span("approval_submit", thread_id=thread_id, trace_id=trace_id):
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(settings.approval_external_endpoint, json={
+                        "intent": skill_name, "thread_id": thread_id, "user_id": user_id,
+                        "params": payload.get("params", {}),
+                        "description": payload.get("description", ""),
+                        "risk_level": "critical", "trace_id": trace_id,
+                    })
+                    approval_id = (resp.json() or {}).get("approval_id", "")
+        except Exception as e:
+            logger.error(f"❌ 外部审批提交失败: thread={thread_id} err={str(e)[:120]}")
+
+    # 2. 落盘:resume 凭证 + 审批单状态(重启不丢)
+    await cache_service.set(f"hitl:resume:{thread_id}", resume_token, ttl=settings.hitl_resume_ttl)
+    if approval_id:
+        await cache_service.set(f"approval:{approval_id}", {
+            "thread_id": thread_id, "resume_token": resume_token,
+            "idempotency_key": idem_key, "trace_id": trace_id, "status": "pending",
+        }, ttl=settings.approval_redis_ttl)
+
+    audit_logger.log_human(
+        thread_id=thread_id, user_id=user_id, skill_name=skill_name,
+        risk_level="critical", action="submit_external",
+        params={"approval_id": approval_id, "trace_id": trace_id},
+    )
+    logger.info(f"📤 外部审批已提交: thread={thread_id} approval_id={approval_id} trace_id={trace_id}")
+
+    review_data = {
+        "mode": "external",
+        "approval_id": approval_id,
+        "status": "pending",
+        "thread_id": thread_id,
+        "intent": skill_name,
+        "title": payload.get("title", f"高危操作待审批：{skill_name}"),
+        "description": payload.get("description", ""),
+        "params": payload.get("params", {}),
+        "risk_level": "critical",
+        "resume_token": resume_token,
+        "idempotency_key": idem_key,
+    }
+    decision = interrupt(review_data)
+    action = decision.get("action", "") if isinstance(decision, dict) else str(decision or "")
+    result = {
+        "human_intervened": True,
+        "human_action": action,
+        "human_approved": action in ("approve", "modify"),
+        "need_human_confirm": False,
+        "confirm_payload": None,
+        "approval_mode": "external",
+        "approval_id": approval_id,
+    }
+    if action == "modify":
+        result["approved_params"] = decision.get("modified_params") if isinstance(decision, dict) else None
+    if action not in ("approve", "modify"):
+        result["agent_output"] = "审批未通过，操作未执行。"
+    return result
 
 
 # ── 路由条件 ─────────────────────────────────────
@@ -662,10 +755,14 @@ def route_after_fact_check(state: AgentState) -> str:
     return "memory_write"
 
 
-# agent_execute 后路由:高危转 hitl_review,parallel 转 aggregate,否则 fact_check
+# agent_execute 后路由:CRITICAL 走外部审批,高危转 hitl_review,parallel 转 aggregate,否则 fact_check
 def route_after_agent(state: AgentState) -> str:
-    """agent_execute 后：高危需人工确认 → hitl_review；parallel 等子结果 → aggregate；否则 fact_check"""
+    """agent_execute 后：CRITICAL → external_approval；高危 → hitl_review；parallel → aggregate；否则 fact_check"""
     if state.get("need_human_confirm"):
+        risk = (state.get("confirm_payload") or {}).get("risk_level", "high")
+        if settings.approval_external_enabled and settings.approval_external_endpoint \
+                and risk == "critical":
+            return "external_approval"
         return "hitl_review"
     plan = state.get("routing_plan") or {}
     if plan.get("mode") == "parallel" and len(plan.get("intents", [])) > 1:
@@ -720,6 +817,7 @@ def build_graph():
     workflow.add_node("memory_write", memory_write_node)
     workflow.add_node("execution_log", execution_log_node)
     workflow.add_node("hitl_review", hitl_review_node)
+    workflow.add_node("external_approval", external_approval_node)
 
     workflow.set_entry_point("cache_check")
 
@@ -728,10 +826,14 @@ def build_graph():
     # supervisor → parallel 时 fan_out（Send 分发子 Agent） / fast 时单路径 rag_retrieve
     workflow.add_conditional_edges("supervisor", fan_out_parallel, ["rag_retrieve"])
     workflow.add_edge("rag_retrieve", "agent_execute")
-    # agent_execute → (高危) hitl_review / (parallel 时 aggregate) / (fast 时 fact_check)
+    # agent_execute → (CRITICAL) external_approval / (高危) hitl_review / (parallel) aggregate / fact_check
     workflow.add_conditional_edges("agent_execute", route_after_agent,
                                    {"fact_check": "fact_check", "aggregate": "aggregate",
-                                    "hitl_review": "hitl_review"})
+                                    "hitl_review": "hitl_review",
+                                    "external_approval": "external_approval"})
+    # 外部审批恢复后与内联确认走同一路由:approve/modify → agent_execute,否则结束
+    workflow.add_conditional_edges("external_approval", route_after_hitl,
+                                   {"agent_execute": "agent_execute", "memory_write": "memory_write"})
     workflow.add_edge("aggregate", "fact_check")
     workflow.add_conditional_edges("fact_check", route_after_fact_check,
                                    {"agent_execute": "agent_execute", "memory_write": "memory_write"})
@@ -822,41 +924,37 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
         return {"success": False, "error": str(e), "reply": "系统处理异常，请重试。"}
 
 
-# 幂等表:已处理过的 idempotency_key(防 HITL 恢复重复提交)
-_IDEMPOTENCY_DONE: set = set()
-
-
-# 幂等校验:返回 True 表示该幂等键已处理过,应拦截重复提交
-def _idempotency_guard(idempotency_key: str) -> bool:
-    """返回 True 表示该幂等键已被处理过(应拦截)。原子性由进程内 set 保证。"""
-    if not idempotency_key:
-        return False
-    if idempotency_key in _IDEMPOTENCY_DONE:
-        return True
-    _IDEMPOTENCY_DONE.add(idempotency_key)
-    return False
-
-
-# HITL 恢复:以 Command(resume) 继续执行,带幂等防重复
+# HITL 恢复:以 Command(resume) 继续执行,带 resume_token 强校验 + Redis 幂等防重复
 async def resume_agent(thread_id: str, decision: dict):
     """HITL 恢复：Command(resume) 作为 input 传入（langgraph 1.2 签名）
 
-    增加幂等保护:同一 idempotency_key 重复恢复会被拦截,不重复执行高危操作。
+    强校验:resume_token 必须匹配该线程挂起时落盘的凭证(防冒用);
+    幂等:同一 idempotency_key 用 Redis setnx 拦截重复提交(重启仍有效)。
     """
     graph = await _ensure_graph()
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     logger.info(f"▶ HITL 人工决策到达: thread={thread_id} action={decision.get('action')}")
 
-    # ⭐ 幂等键防重复提交
+    # ⭐ resume_token 强校验(防冒用):必须匹配挂起时落盘的凭证
+    stored_token = await cache_service.get(f"hitl:resume:{thread_id}")
+    if not stored_token or stored_token != decision.get("resume_token", ""):
+        logger.warning(f"⛔ resume_token 校验失败: thread={thread_id}")
+        return {"success": False, "error": "resume_token 无效或已过期"}
+
+    # ⭐ 幂等:同一 idempotency_key 不重复执行(Redis setnx)
     idempotency_key = decision.get("idempotency_key", "")
-    if _idempotency_guard(idempotency_key):
-        logger.warning(f"♻️ 幂等拦截: idempotency_key={idempotency_key} 已处理过,跳过重复提交")
-        return {"success": True, "idempotent_replay": True,
-                "reply": "该审批已完成,已忽略重复提交。"}
+    if idempotency_key:
+        ok = await cache_service.setnx(f"hitl:done:{idempotency_key}", "1", ttl=settings.hitl_done_ttl)
+        if not ok:
+            logger.warning(f"♻️ 幂等拦截: idempotency_key={idempotency_key} 已处理过,跳过重复提交")
+            return {"success": True, "idempotent_replay": True,
+                    "reply": "该审批已完成,已忽略重复提交。"}
 
     try:
-        result = await graph.ainvoke(Command(resume=decision), config=config)
+        with tracer.span("hitl_resume", thread_id=thread_id, action=decision.get("action", "")):
+            result = await graph.ainvoke(Command(resume=decision), config=config)
         logger.info(f"✅ HITL 恢复执行完成: thread={thread_id} action={decision.get('action')}")
+        await cache_service.delete(f"hitl:resume:{thread_id}")
         return {"success": True, "reply": result.get("agent_output", ""),
                 "intent": result.get("intent", ""),
                 "idempotency_key": idempotency_key}
@@ -864,7 +962,7 @@ async def resume_agent(thread_id: str, decision: dict):
         logger.error(f"❌ HITL 恢复失败: thread={thread_id} error={str(e)[:150]}")
         # 恢复失败:释放幂等键,允许重试
         if idempotency_key:
-            _IDEMPOTENCY_DONE.discard(idempotency_key)
+            await cache_service.delete(f"hitl:done:{idempotency_key}")
         return {"success": False, "error": str(e)}
 
 
@@ -894,7 +992,10 @@ async def recover_thread(thread_id: str, decision: dict = None) -> dict:
     # 2. 若线程有挂起的 interrupt（HITL），走 resume 而非崩溃恢复
     if getattr(snap, "interrupts", ()) or ():
         logger.info(f"↩️ 线程 {thread_id} 处于 HITL 挂起，转 resume")
-        return await resume_agent(thread_id, decision or {"action": "reject"})
+        decision = decision or {"action": "reject"}
+        stored_token = await cache_service.get(f"hitl:resume:{thread_id}")
+        decision["resume_token"] = decision.get("resume_token") or stored_token or ""
+        return await resume_agent(thread_id, decision)
 
     # 3. 无 checkpoint（线程从未开始或已完成），无恢复价值
     snap_values = getattr(snap, "values", None) or {}

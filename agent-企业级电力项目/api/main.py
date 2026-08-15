@@ -99,6 +99,14 @@ class HumanConfirmRequest(BaseModel):
     idempotency_key: str = ""     # 幂等键(防重复提交)
 
 
+# 外部审批回调请求体:审批单号 + 决策 + HMAC 签名
+class ApprovalCallbackRequest(BaseModel):
+    approval_id: str
+    decision: str = "approve"     # approve / reject
+    reason: str = ""
+    signature: str = ""           # HMAC-SHA256(approval_id:decision)
+
+
 # ── 健康检查 ──────────────────────────────────────
 # 健康检查接口:返回 Redis/向量库/模型配置状态
 @app.get("/health")
@@ -283,9 +291,9 @@ async def abort_chat(req: ChatRequest):
 @app.post("/chat/human-confirm")
 async def human_confirm(req: HumanConfirmRequest):
     from agent.graph import resume_agent
-    # ⭐ resume_token 校验:凭 thread_id 不能恢复高危操作,必须有恢复凭证
-    if req.resume_token and len(req.resume_token) < 8:
-        return {"success": False, "error": "resume_token 不合法"}
+    # ⭐ resume_token 强校验:空凭证直接拒绝(凭 thread_id 不能恢复高危操作)
+    if not req.resume_token or len(req.resume_token) < 8:
+        return {"success": False, "error": "resume_token 不能为空且长度至少 8 位"}
     result = await resume_agent(
         req.thread_id,
         {"action": req.action, "reason": req.reason,
@@ -294,6 +302,63 @@ async def human_confirm(req: HumanConfirmRequest):
          "idempotency_key": req.idempotency_key},
     )
     return {"success": result.get("success", False), "data": result}
+
+
+# ── 外部审批回调:审批系统通过/驳回后回调此处,恢复挂起的操作 ──
+@app.post("/chat/approval-callback")
+async def approval_callback(req: ApprovalCallbackRequest):
+    import hashlib
+    import hmac
+    from agent.graph import resume_agent
+    from api.notify import publish
+    secret = settings.approval_callback_secret or ""
+    expected = hmac.new(secret.encode(), f"{req.approval_id}:{req.decision}".encode(),
+                        hashlib.sha256).hexdigest()
+    if not secret or not hmac.compare_digest(expected, req.signature or ""):
+        return {"success": False, "error": "signature 无效"}
+    rec = await cache_service.get(f"approval:{req.approval_id}")
+    if not rec:
+        return {"success": False, "error": "审批单不存在或已过期"}
+    thread_id = rec.get("thread_id", "")
+    from observability.tracing import tracer
+    with tracer.span("approval_callback", approval_id=req.approval_id,
+                     thread_id=thread_id, decision=req.decision):
+        result = await resume_agent(thread_id, {
+            "action": req.decision, "reason": req.reason,
+            "resume_token": rec.get("resume_token", ""),
+            "idempotency_key": rec.get("idempotency_key", ""),
+            "source": "external",
+        })
+    rec["status"] = "done" if result.get("success") else "error"
+    await cache_service.set(f"approval:{req.approval_id}", rec, ttl=settings.approval_redis_ttl)
+    publish(thread_id, {
+        "event": "resume_result",
+        "data": {"success": result.get("success", False), "reply": result.get("reply", ""),
+                 "decision": req.decision},
+    })
+    return {"success": result.get("success", False), "data": result}
+
+
+# ── 外部审批推送:前端进入"等待审批"态时订阅此长连接,收审批结果 ──
+@app.get("/chat/notify")
+async def chat_notify(thread_id: str = ""):
+    from sse_starlette.sse import EventSourceResponse, ServerSentEvent
+    from api.notify import subscribe, unsubscribe
+
+    async def event_generator():
+        queue = subscribe(thread_id)
+        try:
+            while True:
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=25)
+                    yield ServerSentEvent(event=evt["event"],
+                                          data=json.dumps(evt["data"], ensure_ascii=False))
+                except asyncio.TimeoutError:
+                    yield ServerSentEvent(event="ping", data="")
+        finally:
+            unsubscribe(thread_id, queue)
+
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 # ── 崩溃恢复：进程 crash 后从 checkpoint 重新拉起未完成线程 ──

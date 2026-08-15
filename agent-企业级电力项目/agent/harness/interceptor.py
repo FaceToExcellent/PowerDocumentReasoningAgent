@@ -40,14 +40,18 @@ class HarnessInterceptor:
             logger.info(f"[harness] 中风险 Skill {skill_name} 自动执行（已记录）")
         return InterceptResult(need_confirm=False, risk_level=risk)
 
+    # 生成恢复凭证与幂等键(内联/外部审批复用)
+    def _gen_credentials(self, thread_id: str, skill_name: str, params: dict) -> dict:
+        """生成 resume_token(防冒用) + idempotency_key(防重复)。"""
+        resume_token = uuid.uuid4().hex[:16]
+        raw = f"{thread_id}:{skill_name}:{json.dumps(params, ensure_ascii=False)}"
+        idempotency_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+        return {"resume_token": resume_token, "idempotency_key": idempotency_key}
+
     # 构造人工确认消息(含恢复凭证与幂等键)
     def _build_confirm(self, skill_name: str, params: dict, risk: RiskLevel,
                        thread_id: str = "") -> dict:
-        # ⭐ resume_token:防冒用凭证(仅凭 thread_id 不能恢复高危操作)
-        resume_token = uuid.uuid4().hex[:16]
-        # ⭐ idempotency_key:防重复提交(同一恢复命中同一 key 不重复执行)
-        raw = f"{thread_id}:{skill_name}:{json.dumps(params, ensure_ascii=False)}"
-        idempotency_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+        creds = self._gen_credentials(thread_id, skill_name, params)
         return {
             "type": "human_confirm",
             "title": f"高危操作确认：{skill_name}",
@@ -55,8 +59,8 @@ class HarnessInterceptor:
             "params": params,
             "description": f"即将执行 {skill_name}，参数：{json.dumps(params, ensure_ascii=False)[:200]}",
             "options": ["确认执行", "驳回操作", "修改参数后执行"],
-            "resume_token": resume_token,        # 恢复凭证
-            "idempotency_key": idempotency_key,  # 幂等键
+            "resume_token": creds["resume_token"],        # 恢复凭证
+            "idempotency_key": creds["idempotency_key"],  # 幂等键
             "thread_id": thread_id,
         }
 

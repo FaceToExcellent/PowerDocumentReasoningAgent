@@ -47,6 +47,9 @@ class AgentState(TypedDict, total=False):
     human_intervened: bool
     human_action: Optional[str]
     human_approved: bool               # 人工确认后放行标记，避免二次拦截
+    approved_params: Optional[Dict]    # modify 后人工修改的参数
+    approval_mode: Optional[str]       # inline / external
+    approval_id: Optional[str]         # 外部审批单号
 
     # 工具澄清
     need_clarification: bool
@@ -96,6 +99,7 @@ def create_initial_state(thread_id="", user_id="", account="anonymous", employee
         confidence_level="high",
         need_human_confirm=False, confirm_payload=None,
         human_intervened=False, human_action=None, human_approved=False,
+        approved_params=None, approval_mode=None, approval_id=None,
         need_clarification=False, clarification=None,
         cache_hit=False, iteration_count=0, max_iterations=3,
         start_time=0.0, timeout_seconds=180, duration_ms=0,
