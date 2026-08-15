@@ -11,6 +11,7 @@ from memory.short_term import short_term_memory
 logger = logging.getLogger(__name__)
 
 
+# 粗略估算 token 数（中文按字，英文按 4 字符）
 def _count_tokens(text: str) -> int:
     """粗略 token 估算（中文按字，英文按 4 字符）"""
     if not text:
@@ -20,10 +21,13 @@ def _count_tokens(text: str) -> int:
     return cn + int(other / 4) + 1
 
 
+# 记忆统一管理器：协调短期/流水记忆，推理前按需构建上下文
 class MemoryManager:
+    # 初始化，设置上下文 token 预算
     def __init__(self, max_tokens: int = None):
         self.max_tokens = max_tokens or settings.max_context_tokens
 
+    # 推理前加载记忆，拼接不超过 token 预算的上下文片段
     async def build_context(self, *, tenant_id="", user_id="", thread_id="",
                             query="", max_tokens=None) -> str:
         """推理前按需加载记忆，返回拼好的上下文片段（≤ max_tokens）"""
@@ -58,6 +62,7 @@ class MemoryManager:
 
         return "\n\n".join(parts)
 
+    # 推理后异步写入记忆（流水 + 短期 Redis）
     async def record(self, *, tenant_id="", user_id="", thread_id="", reply_id="",
                      role="", content="", content_type="text", intent=""):
         """推理后自动写入记忆（异步不阻塞）"""

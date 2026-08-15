@@ -10,6 +10,7 @@ from agent.skills.registry import skill_registry
 logger = logging.getLogger(__name__)
 
 
+# 按当前领域注册全部 Skill(默认用 settings.domain)
 def register_all_skills(domain_name: str = None) -> skill_registry.__class__:
     """按领域注册 Skill。domain_name 缺省用 settings.domain"""
     domain = get_domain(domain_name or settings.domain)

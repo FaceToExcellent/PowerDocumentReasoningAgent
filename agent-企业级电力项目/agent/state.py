@@ -3,6 +3,7 @@ from typing import TypedDict, Optional, List, Dict, Any, Annotated
 import operator
 
 
+# AgentState — LangGraph 全局共享状态字段定义(TypedDict)
 class AgentState(TypedDict, total=False):
     # 会话标识
     thread_id: str
@@ -81,6 +82,7 @@ class AgentState(TypedDict, total=False):
     error: Optional[str]
 
 
+# 创建带默认值的初始 AgentState
 def create_initial_state(thread_id="", user_id="", account="anonymous", employee_id="",
                          tenant_id="default", user_input="") -> AgentState:
     return AgentState(

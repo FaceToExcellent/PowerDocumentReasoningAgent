@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _HEADING_RE = None  # 轻量标题匹配在 split 内做
 
 
+# 按标题层级+段落切分文档，产出带元数据(含前后chunk链接)的chunks列表
 def split_document(content: str, source: str = "", title: str = "",
                    chunk_size: int = None) -> List[Dict[str, Any]]:
     """按标题层级 + 段落切分，产出带元数据的 chunks
@@ -41,11 +42,13 @@ def split_document(content: str, source: str = "", title: str = "",
     return docs
 
 
+# 生成稳定的chunk唯一id(来源+索引md5)
 def _make_chunk_id(source: str, index: int, text: str) -> str:
     base = hashlib.md5(f"{source}:{index}".encode()).hexdigest()[:10]
     return f"{source}-{base}-{index:04d}" if source else f"doc-{base}-{index:04d}"
 
 
+# 按疑似标题累积section_path，并按chunk_size聚块的轻量切分实现
 def _split_by_heading_and_size(content: str, chunk_size: int) -> List[tuple]:
     """轻量实现：先按行切，遇到短行（疑似标题）累积到 section_path；按 chunk_size 聚块"""
     lines = content.splitlines()
@@ -54,6 +57,7 @@ def _split_by_heading_and_size(content: str, chunk_size: int) -> List[tuple]:
     current_size = 0
     current_path: List[str] = []
 
+    # 将当前累积的行写入chunk并重置缓冲
     def flush():
         nonlocal current_lines, current_size
         if current_lines:
@@ -87,6 +91,7 @@ def _split_by_heading_and_size(content: str, chunk_size: int) -> List[tuple]:
     return chunks
 
 
+# 合并标题路径：新标题替换/追加，保持层级
 def _merge_path(old: List[str], heading: str) -> List[str]:
     """简化：新标题替换最后一个元素（单层），够本机演示"""
     if old and len(old) >= 1:

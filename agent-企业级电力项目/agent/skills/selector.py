@@ -10,12 +10,15 @@ from agent.skills.registry import skill_registry
 logger = logging.getLogger(__name__)
 
 
+# Skill 动态选择器:三层筛选(权限→租户可见→语义 Top-K)
 class SkillSelector:
+    # 初始化选择器(当前为简单关键词打分方案)
     def __init__(self):
         # 简单语义打分：query 关键词与 skill 描述/标签的重叠度
         # 生产可换 BGE-M3 向量语义排序（M5.6 计划）
         pass
 
+    # 按三层筛选选出匹配 query 的 Skill 元数据列表
     def select_skills(self, query: str, user_context: Dict = None,
                       top_k: int = 5) -> List[SkillMetadata]:
         user_context = user_context or {}
@@ -38,6 +41,7 @@ class SkillSelector:
             selected = s2[:top_k]
         return selected
 
+    # 计算 query 与 Skill 描述/标签的关键词重叠得分(标签加权)
     @staticmethod
     def _score(query: str, meta: SkillMetadata) -> int:
         q = query.lower()
@@ -55,6 +59,7 @@ class SkillSelector:
                 score += 1
         return score
 
+    # 将候选 Skill 列表格式化为给 LLM 的提示文本
     def format_for_prompt(self, skills: List[SkillMetadata]) -> str:
         lines = []
         for i, s in enumerate(skills, 1):

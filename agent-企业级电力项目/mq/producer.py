@@ -10,10 +10,13 @@ logger = logging.getLogger(__name__)
 TOPIC_DOC_INGEST = "doc_ingest_topic"
 
 
+# MQ 生产者：投递文档摄入消息
 class MQProducer:
+    # 初始化，绑定传输层
     def __init__(self, transport: MQTransport = mq_transport):
         self.t = transport
 
+    # 发送文档摄入消息到 topic
     async def send_doc_ingest(self, file_info: dict, tenant_id: str) -> str:
         return await self.t.send(TOPIC_DOC_INGEST, {
             "file_id": file_info.get("file_id", ""),
@@ -26,16 +29,20 @@ class MQProducer:
 mq_producer = MQProducer()
 
 
+# 文档摄入消费者：解析 → 切片 → 入库 → 更新状态
 class DocIngestConsumer:
     """文档摄入消费者：解析 → 切片 → 入库 → 更新状态"""
 
+    # 初始化，绑定传输层
     def __init__(self, transport: MQTransport = mq_transport):
         self.t = transport
 
+    # 启动消费，订阅文档摄入 topic
     async def start(self):
         logger.info("📥 文档摄入消费者启动（本地 Redis transport）")
         await self.t.consume(TOPIC_DOC_INGEST, self._handle)
 
+    # 处理一条文档消息：切片入库并返回是否成功
     async def _handle(self, msg: dict) -> bool:
         body = msg.get("body", {})
         tenant_id = body.get("tenant_id", "default")

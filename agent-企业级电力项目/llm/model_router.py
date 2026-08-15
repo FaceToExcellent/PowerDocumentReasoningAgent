@@ -4,6 +4,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# 模型分级路由：按任务复杂度选择后端并维护降级链
 class ModelRouter:
     """按任务复杂度选模型。轻量任务走 deepseek-chat(便宜快),核心推理走 deepseek-reasoner,本地仅降级。"""
 
@@ -32,9 +33,11 @@ class ModelRouter:
         "local_small": [],
     }
 
+    # 根据任务名返回主用后端名
     def route(self, task: str) -> str:
         return self.TASK_BACKEND.get(task, "deepseek_chat")
 
+    # 返回指定后端对应的降级链
     def fallback_for(self, backend: str) -> list:
         return self.FALLBACK_CHAIN.get(backend, [])
 

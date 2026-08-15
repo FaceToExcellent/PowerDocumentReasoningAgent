@@ -47,9 +47,11 @@ _ENTITY_ALIASES: Dict[str, str] = {
 }
 
 
+# KG实体关系索引：三元组抽取+别名归一化+一跳关系查询
 class EntityIndex:
     """KG 实体关系索引：三元组抽取 + 别名归一化 + 一跳关系查询"""
 
+    # 初始化持久化路径并加载图存储
     def __init__(self, persist_path: str = None):
         self.persist_path = persist_path or str(
             Path(settings.chroma_persist_dir).parent / "kg" / "graph_store.json"
@@ -57,6 +59,7 @@ class EntityIndex:
         self._graph_store = None
         self._load()
 
+    # 从磁盘加载SimpleGraphStore(不存在则新建，未安装则置空)
     def _load(self):
         try:
             from llama_index.core.graph_stores import SimpleGraphStore
@@ -77,6 +80,7 @@ class EntityIndex:
             return _ENTITY_ALIASES[key]
         return name.strip()
 
+    # 从文本中抽取已知实体(词典子串匹配+别名归一化，去重返回)
     def extract_entities(self, text: str) -> List[str]:
         """从文本中抽取已知实体（词典子串匹配 + 别名归一化，去重）"""
         found = set()
@@ -123,6 +127,7 @@ class EntityIndex:
             logger.warning(f"KG 关系查询失败: {e}")
         return rels
 
+    # 别名感知的一跳关系查询(上层统一入口)
     def query(self, entity: str) -> List[Dict]:
         """别名感知的一跳查询（上层统一入口）"""
         return self.get_relations(entity, max_depth=1)
@@ -133,6 +138,7 @@ class EntityIndex:
             Path(self.persist_path).parent.mkdir(parents=True, exist_ok=True)
             self._graph_store.persist(self.persist_path)
 
+    # 返回当前三元组数量
     def count(self) -> int:
         """当前三元组数量"""
         try:

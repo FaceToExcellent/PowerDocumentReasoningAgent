@@ -16,12 +16,15 @@ from observability.tracing import get_trace_id
 _audit_logger = logger.bind(audit=True)
 
 
+# 审计日志双写器：结构化 JSON 落盘 + SQLite 入库
 class AuditLogger:
+    # 初始化：加载数据库路径、加锁并建表
     def __init__(self):
         self._db_path = settings.sqlite_audit_db
         self._lock = threading.Lock()
         self._init_db()
 
+    # 初始化 SQLite 库，创建审计相关三张表
     def _init_db(self):
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._lock, sqlite3.connect(self._db_path) as conn:
@@ -52,6 +55,7 @@ class AuditLogger:
                 )
             """)
 
+    # 通用插入：向指定审计表写入一条记录
     def _insert(self, table: str, data: dict):
         try:
             with self._lock, sqlite3.connect(self._db_path) as conn:
@@ -109,6 +113,7 @@ class AuditLogger:
         }
         _audit_logger.error(json.dumps({"event": "security", **rec}, ensure_ascii=False))
 
+    # 查询审计表，返回最近 limit 条记录
     def query(self, table: str, limit: int = 20) -> list:
         try:
             with self._lock, sqlite3.connect(self._db_path) as conn:

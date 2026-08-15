@@ -10,7 +10,9 @@ from observability.tracing import (
 )
 
 
+# 网关请求日志中间件：记录请求耗时并透传 TraceID
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    # 请求入口：生成/透传 trace_id，记录耗时日志并注入响应头
     async def dispatch(self, request, call_next):
         start = time.time()
         if HAS_OTEL:

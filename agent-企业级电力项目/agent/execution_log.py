@@ -2,6 +2,7 @@
 from observability.audit import audit_logger
 
 
+# 写 Agent 执行日志,复用审计模块落库
 def write_log(thread_id, account, emp_id, intent, user_input, output, confidence,
               fc_passed, fc_errors, fc_feedback, duration_ms, iteration, cache_hit, rag_hit_rate,
               fallback_used=0, timeout=0, tenant_id="", user_id="", **kwargs):

@@ -24,16 +24,20 @@ _PHONE_RE = re.compile(r"1[3-9]\d{9}")
 _ADDR_RE = re.compile(r"(地址|收货|住址)[:：]?\S{4,30}")
 
 
+# 外部文本数据类:携带来源类型与来源 ID 供扫描
 class ExternalText:
     """外部文本:带来源与来源ID(用于扫描与边界标记)。"""
 
+    # 初始化外部文本的来源与内容
     def __init__(self, source_type: str, text: str, source_id: str = ""):
         self.source_type = source_type   # user / tool / rag
         self.source_id = source_id
         self.text = text
 
 
+# 安全扫描结果:记录来源/风险分类/脱敏内容与处置
 class SafetyScan:
+    # 初始化扫描结果各字段
     def __init__(self, source_type: str, source_id: str, categories: List[str],
                  tainted: bool, sanitized_content: str, allowed_for_model: bool,
                  handling: str):
@@ -45,6 +49,7 @@ class SafetyScan:
         self.allowed_for_model = allowed_for_model
         self.handling = handling
 
+    # 将扫描结果转为字典(供上报与日志)
     def to_dict(self) -> Dict[str, Any]:
         return {
             "source_type": self.source_type, "source_id": self.source_id,
@@ -54,6 +59,7 @@ class SafetyScan:
         }
 
 
+# 识别文本的风险分类(注入/索密/隐私)
 def _scan_categories(text: str) -> List[str]:
     """识别文本风险分类。"""
     categories = []
@@ -67,6 +73,7 @@ def _scan_categories(text: str) -> List[str]:
     return categories
 
 
+# 中和脏指令并脱敏隐私信息
 def _sanitize(text: str) -> str:
     """中和脏指令 + 脱敏隐私。"""
     # 中和注入指令(保留证据但执行不了)
@@ -79,6 +86,7 @@ def _sanitize(text: str) -> str:
     return text
 
 
+# 扫描单条外部文本并决定放行/中和/脱敏
 def scan_external_text(ext: ExternalText) -> SafetyScan:
     """扫描单条外部文本,决定是否放行 + 脱敏内容。"""
     categories = _scan_categories(ext.text)
@@ -109,6 +117,7 @@ def scan_external_text(ext: ExternalText) -> SafetyScan:
                       sanitized, allowed, handling)
 
 
+# 统一扫描用户消息与外部文本,输出安全决策
 def build_safety_decision(user_message: str, external_texts: List[ExternalText]) -> Dict[str, Any]:
     """对用户消息 + 外部文本(工具/RAG)统一扫描,输出安全决策。"""
     source_scans = []
@@ -133,6 +142,7 @@ def build_safety_decision(user_message: str, external_texts: List[ExternalText])
     }
 
 
+# 重组脱敏上下文,返回安全后的用户消息与 RAG 文本
 def sanitize_context_for_model(user_message: str, rag_context: str = "",
                                tool_context: str = "") -> Dict[str, Any]:
     """重组脱敏上下文:返回安全后的 user 消息 + 数据边界包裹的外部文本。"""

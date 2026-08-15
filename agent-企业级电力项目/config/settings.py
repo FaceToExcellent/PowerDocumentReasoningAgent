@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 from typing import List, Optional
 
 
+# 全局配置：pydantic-settings 从 .env 加载，集中管理各模块参数
 class Settings(BaseSettings):
     # ── 推理层 ──
     deepseek_api_key: str = ""                     # 从环境变量注入，不落盘
@@ -53,6 +54,9 @@ class Settings(BaseSettings):
     gateway_enabled: bool = True
     gateway_api_key: str = ""          # 预留：MCP/租户 API Key（本机默认空=放行）
     rate_limit_per_minute: int = 60    # 单租户每分钟限流
+
+    # ── 观测 / 追踪（OTel）──
+    otel_enabled: bool = False         # true 时把 span 推到 OTLP 后端（.env 用 OTEL_ENABLED 覆盖）
 
     # ── 电力业务 ──
     power_voltage_levels: List[str] = ["10", "35", "110", "220", "500", "750"]

@@ -6,9 +6,11 @@ from pathlib import Path
 from loguru import logger as _loguru
 
 
+# 标准 logging 处理器：将日志记录转接到 loguru
 class _InterceptHandler(logging.Handler):
     """把标准 logging 的日志转接到 loguru"""
 
+    # 转发单条日志记录到 loguru，保留日志级别与异常堆栈
     def emit(self, record):
         try:
             level = logger.level(record.levelname).name
@@ -21,6 +23,7 @@ class _InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
+# 初始化 loguru（控制台 + 应用文件 + 审计日志），并接管标准 logging
 def setup_logging(level: str = "INFO", log_dir: str = "./logs"):
     """初始化 loguru，同时接管标准 logging"""
     Path(log_dir).mkdir(parents=True, exist_ok=True)

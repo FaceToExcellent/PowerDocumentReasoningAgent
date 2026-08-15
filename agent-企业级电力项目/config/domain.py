@@ -8,6 +8,7 @@ from abc import ABC
 from typing import Dict, List
 
 
+# 领域配置基类：定义意图词、提示词、Skill 与演示文档等领域化内容
 class DomainConfig(ABC):
     """领域配置：定义某领域的意图词、提示词、Skill、演示文档。
 
@@ -23,9 +24,11 @@ class DomainConfig(ABC):
     demo_docs: List[Dict] = []
     chat_intent: str = "chat"
 
+    # 返回当前领域支持的意图关键词列表
     def get_intents(self) -> List[str]:
         return list(self.intent_keywords.keys())
 
+    # 意图映射到主 Skill 名（供 agent_execute 使用），子类可覆盖
     def intent_to_skill(self, intent: str) -> str:
         """意图 → 主 Skill 名（供 agent_execute 用）；子类可覆盖"""
         return ""
@@ -53,6 +56,7 @@ class DomainConfig(ABC):
             "fragment_count": len(fragments),
         }
 
+    # 按意图挑选启用的 Prompt 片段，未匹配时回退到 chat 或第一个片段
     def select_prompt_fragments(self, intent: str) -> List[Dict]:
         """按意图选择 Prompt 片段(对齐课程 select_prompt_fragments)。"""
         reg = self.prompt_registry
@@ -65,6 +69,7 @@ class DomainConfig(ABC):
         return selected
 
 
+# 领域工厂：按名称实例化对应的领域配置
 def get_domain(name: str) -> DomainConfig:
     """领域工厂：按名字实例化领域配置"""
     if name == "power":

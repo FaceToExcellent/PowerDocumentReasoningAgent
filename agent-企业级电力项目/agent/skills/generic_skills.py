@@ -12,6 +12,7 @@ from llm.adapter import unified_llm
 logger = logging.getLogger(__name__)
 
 
+# 复用 RAG 检索,返回证据文本与结构化引用列表
 def _retrieve_with_citations(query: str, tenant_id: str, top_k: int = 4) -> Dict[str, Any]:
     """复用 RAG 底座检索,返回 evidence 文本 + 结构化 citations(引用溯源)。"""
     try:
@@ -37,6 +38,7 @@ def _retrieve_with_citations(query: str, tenant_id: str, top_k: int = 4) -> Dict
         return {"evidence": "（检索不可用）", "citations": []}
 
 
+# 从查询抽实体并查知识图谱一跳关系,返回精确关系证据
 def _kg_evidence(query: str) -> str:
     """从问题抽电力实体 → 查 KG 一跳关系 → 证据文本(向量补不了的精确关系)。"""
     try:
@@ -52,9 +54,11 @@ def _kg_evidence(query: str) -> str:
         return ""
 
 
+# 通用文档问答 Skill(基于证据回答并引用出处)
 class DocQASkill(BaseSkill):
     """通用文档问答"""
 
+    # 元数据:文档问答 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -65,6 +69,7 @@ class DocQASkill(BaseSkill):
             category="问答",
         )
 
+    # 执行文档问答:检索证据+KG,调用 LLM 生成带引用的回答
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         user_ctx = context.get("user_context", {})
@@ -85,9 +90,11 @@ class DocQASkill(BaseSkill):
             return {"success": False, "error": str(e)}
 
 
+# 通用文档对比 Skill(对比两份文档/方案差异)
 class DocCompareSkill(BaseSkill):
     """通用对比分析"""
 
+    # 元数据:文档对比 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -98,6 +105,7 @@ class DocCompareSkill(BaseSkill):
             category="分析",
         )
 
+    # 执行文档对比:检索证据+KG,调用 LLM 做维度化对比
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         user_ctx = context.get("user_context", {})
@@ -119,9 +127,11 @@ class DocCompareSkill(BaseSkill):
             return {"success": False, "error": str(e)}
 
 
+# 通用文档总结 Skill(分条提炼要点并标注章节)
 class DocSummarySkill(BaseSkill):
     """通用文档总结"""
 
+    # 元数据:文档总结 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -132,6 +142,7 @@ class DocSummarySkill(BaseSkill):
             category="总结",
         )
 
+    # 执行文档总结:检索证据并调用 LLM 提炼要点
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         user_ctx = context.get("user_context", {})

@@ -15,13 +15,16 @@ from observability.metrics import metrics
 logger = logging.getLogger(__name__)
 
 
+# 统一 LLM 入口：按任务路由到对应后端并自动降级
 class UnifiedLLM:
     """统一推理入口。按任务路由到对应后端，失败自动降级。"""
 
+    # 初始化后端实例缓存与健康状态字典
     def __init__(self):
         self._backends = {}
         self._health = {}
 
+    # 按名字懒加载并缓存对应后端实例
     def _get_backend(self, name: str):
         if name not in self._backends:
             if name == "deepseek_reasoner":
@@ -38,6 +41,7 @@ class UnifiedLLM:
                 self._backends[name] = LocalSmallBackend()
         return self._backends[name]
 
+    # 根据任务生成按优先级排列的后端调用链（含降级）
     def _chain_for(self, task: str) -> list:
         """返回按优先级排列的后端链（含降级）"""
         primary = model_router.route(task)
@@ -52,6 +56,7 @@ class UnifiedLLM:
             filtered = ["local_small"]
         return filtered
 
+    # 依次尝试后端链直至成功，失败则记录健康状态并自动降级
     async def ainvoke(self, task: str, messages: list, **kwargs) -> LLMResult:
         last_error = None
         for name in self._chain_for(task):
@@ -77,6 +82,7 @@ class UnifiedLLM:
                 metrics.incr("llm_fallback_total", labels={"backend": name})
         raise RuntimeError(f"所有 LLM 后端均不可用: {last_error}")
 
+    # 流式调用后端链，逐块 yield thinking/content 片段
     async def astream(self, task: str, messages: list):
         """流式调用。yield dict: {type: thinking|content, text: str, is_final: bool}"""
         chain = self._chain_for(task)

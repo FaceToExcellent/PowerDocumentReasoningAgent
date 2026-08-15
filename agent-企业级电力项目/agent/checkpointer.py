@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 checkpointer: AsyncSqliteSaver = None  # type: ignore[assignment]
 
 
+# 在运行中的 event loop 内创建并初始化官方 AsyncSqliteSaver
 async def init_checkpointer() -> AsyncSqliteSaver:
     """在运行中的 event loop 内创建官方 AsyncSqliteSaver"""
     global checkpointer
@@ -40,6 +41,7 @@ async def init_checkpointer() -> AsyncSqliteSaver:
     return checkpointer
 
 
+# 关闭 checkpointer 连接并置空
 async def close_checkpointer() -> None:
     global checkpointer
     if checkpointer is not None:

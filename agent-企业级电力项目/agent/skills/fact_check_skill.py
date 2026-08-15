@@ -8,7 +8,9 @@ from agent.harness.risk_level import RiskLevel
 logger = logging.getLogger(__name__)
 
 
+# 事实校验 Skill:对 Agent 输出做证据支撑与数值一致性校验
 class FactCheckSkill(BaseSkill):
+    # 元数据:事实校验 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -19,6 +21,7 @@ class FactCheckSkill(BaseSkill):
             category="校验",
         )
 
+    # 执行校验:调用 check_output 对输出做事实核查
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         from agent.fact_checker import check_output
         output = context.get("content", "")

@@ -2,6 +2,7 @@
 from config.domain import DomainConfig
 
 
+# 通用领域配置：文档问答/对比/总结，验证底座领域无关性
 class GenericDomainConfig(DomainConfig):
     name = "generic"
     label = "通用文档分析"
@@ -55,6 +56,7 @@ class GenericDomainConfig(DomainConfig):
 2.3 发现异常立即上报值班工程师。"""},
     ]
 
+    # 意图映射到通用 Skill 名
     def intent_to_skill(self, intent: str) -> str:
         mapping = {
             "doc_qa": "doc_qa",

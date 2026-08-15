@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 CASES_PATH = Path(__file__).parent / "cases.yml"
 
 
+# 加载评测用例:从 cases.yml 读取并返回用例列表
 def load_cases() -> List[Dict[str, Any]]:
     if not CASES_PATH.exists():
         return []
@@ -29,6 +30,7 @@ def load_cases() -> List[Dict[str, Any]]:
     return data.get("cases", [])
 
 
+# 断言单字段,返回失败原因列表
 def _check_expected(section: Dict[str, Any], name: str, actual: Any) -> List[str]:
     """断言单字段,返回失败原因列表。"""
     failures = []
@@ -53,6 +55,7 @@ def _check_expected(section: Dict[str, Any], name: str, actual: Any) -> List[str
     return failures
 
 
+# 断言回答中不出现禁止文本
 def _check_forbidden(forbidden: List[str], reply: str) -> List[str]:
     """断言回答中不出现禁止文本。"""
     failures = []
@@ -64,6 +67,7 @@ def _check_forbidden(forbidden: List[str], reply: str) -> List[str]:
     return failures
 
 
+# 运行固定 case 回归评测并汇总结果
 async def run_eval(case_ids: List[str] | None = None) -> Dict[str, Any]:
     """运行固定 case 回归评测。"""
     from agent.graph import run_agent

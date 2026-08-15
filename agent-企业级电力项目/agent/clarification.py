@@ -11,15 +11,18 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+# 结构化澄清请求类
 class Clarification:
     """结构化澄清请求。"""
 
+    # 初始化澄清字段、问题与候选答案
     def __init__(self, clarification_field: str, question: str,
                  candidates: List[str] = None):
         self.clarification_field = clarification_field
         self.question = question
         self.candidates = candidates or []
 
+    # 序列化为字典
     def to_dict(self) -> Dict[str, Any]:
         return {
             "clarification_field": self.clarification_field,
@@ -28,6 +31,7 @@ class Clarification:
         }
 
 
+# 工具前澄清:检查必填参数缺失时追问
 def pre_tool_clarification(intent: str, query: str, params: Dict[str, Any],
                            required: List[str]) -> Optional[Clarification]:
     """工具前澄清:检查必填参数,缺失则追问。"""
@@ -46,6 +50,7 @@ def pre_tool_clarification(intent: str, query: str, params: Dict[str, Any],
     )
 
 
+# 工具后澄清:多候选不唯一时让用户确认
 def post_tool_clarification(result: Dict[str, Any], candidates_key: str = "candidates") -> Optional[Clarification]:
     """工具后澄清:返回多个候选且目标不唯一时,让用户确认。"""
     candidates = result.get(candidates_key) or []

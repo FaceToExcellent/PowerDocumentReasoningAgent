@@ -10,9 +10,11 @@ from llm.llm_result import LLMResult
 logger = logging.getLogger(__name__)
 
 
+# DeepSeek v4 API 后端：支持 reasoner / chat 两级模型，核心推理与原生流式思考
 class DeepSeekBackend:
     """DeepSeek v4 API。API key 从环境变量注入，代码不落盘。支持 reasoner / chat 两级模型。"""
 
+    # 初始化后端类型、模型名、地址与 API key
     def __init__(self, model: str = "", base_url: str = "", api_key: str = "", *, kind: str = "reasoner"):
         """kind: reasoner(默认,核心推理) / chat(轻量任务,便宜快)"""
         self.kind = kind
@@ -25,14 +27,17 @@ class DeepSeekBackend:
         self.base_url = (base_url or settings.deepseek_base_url).rstrip("/")
         self.api_key = api_key or settings.deepseek_api_key
 
+    # 无 API key 时判定为不可用
     @property
     def available(self) -> bool:
         """无 API key 时不可用（自动降级本地）"""
         return bool(self.api_key)
 
+    # 构造携带 API key 的鉴权请求头
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
+    # 调用 DeepSeek 非流式接口并封装为 LLMResult
     async def ainvoke(self, messages: list, **kwargs) -> LLMResult:
         if not self.available:
             raise RuntimeError("DeepSeek API key 未配置")
@@ -57,6 +62,7 @@ class DeepSeekBackend:
             token_usage=data.get("usage", {}),
         )
 
+    # 原生 HTTP 流式，完整获取 reasoning_content（thinking）
     async def astream_raw(self, messages: list) -> AsyncIterator[dict]:
         """原生 HTTP 流式，完整获取 reasoning_content（thinking）。
         yield {"thinking": str, "content": str, "is_final": bool}
@@ -91,6 +97,7 @@ class DeepSeekBackend:
                     }
 
 
+# JSON 字符串解析工具函数
 def json_loads(s: str) -> dict:
     import json
     return json.loads(s)

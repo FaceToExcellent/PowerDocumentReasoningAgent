@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 _WHITELIST = ["/health", "/docs", "/openapi.json", "/metrics", "/favicon.ico"]
 
 
+# 网关鉴权中间件：API Key / JWT 校验，本机默认放行
 class AuthMiddleware(BaseHTTPMiddleware):
+    # 请求入口：白名单放行、API Key 校验并注入租户/用户信息
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if self._is_whitelist(path):
@@ -30,6 +32,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.account = request.state.user_id or "anonymous"
         return await call_next(request)
 
+    # 判断请求路径是否在白名单中
     @staticmethod
     def _is_whitelist(path: str) -> bool:
         return any(path.startswith(p) for p in _WHITELIST)

@@ -11,7 +11,9 @@ from observability.audit import audit_logger
 logger = logging.getLogger(__name__)
 
 
+# 拦截结果:是否需人工确认 + 风险等级 + 确认信息
 class InterceptResult:
+    # 初始化拦截结果字段
     def __init__(self, need_confirm: bool, risk_level: RiskLevel = RiskLevel.LOW,
                  message: Optional[Dict] = None):
         self.need_confirm = need_confirm
@@ -19,9 +21,11 @@ class InterceptResult:
         self.message = message or {}
 
 
+# Skill 执行前的强制拦截层,无法绕过
 class HarnessInterceptor:
     """所有 Skill 执行前必经的强制拦截层，无法绕过"""
 
+    # 前置拦截:按风险等级决定是否需人工确认
     async def before_skill_execute(self, skill_name: str, params: dict,
                                    user_id: str = "", thread_id: str = "") -> InterceptResult:
         risk = get_risk_level(skill_name)
@@ -36,6 +40,7 @@ class HarnessInterceptor:
             logger.info(f"[harness] 中风险 Skill {skill_name} 自动执行（已记录）")
         return InterceptResult(need_confirm=False, risk_level=risk)
 
+    # 构造人工确认消息(含恢复凭证与幂等键)
     def _build_confirm(self, skill_name: str, params: dict, risk: RiskLevel,
                        thread_id: str = "") -> dict:
         # ⭐ resume_token:防冒用凭证(仅凭 thread_id 不能恢复高危操作)
@@ -55,6 +60,7 @@ class HarnessInterceptor:
             "thread_id": thread_id,
         }
 
+    # 记录人工操作全量审计
     async def record_human_action(self, *, thread_id, user_id, skill_name, risk_level,
                                   action, params=None, reason=""):
         """人工操作全量审计"""

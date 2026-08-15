@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PASS, FAIL = 0, 0
 
 
+# 记录单项测试结果并累加通过/失败计数
 def check(name, ok):
     global PASS, FAIL
     print(f"  {'✅' if ok else '❌'} {name}")
@@ -18,6 +19,7 @@ def check(name, ok):
         FAIL += 1
 
 
+# 冒烟测试主流程:逐模块验证并输出结果
 async def main():
     import asyncio
     print("═" * 50)

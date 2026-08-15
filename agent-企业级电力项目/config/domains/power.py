@@ -2,6 +2,7 @@
 from config.domain import DomainConfig
 
 
+# 电力领域配置：规程检索、造价核算、故障处置、设备对比
 class PowerDomainConfig(DomainConfig):
     name = "power"
     label = "电力智能运维"
@@ -68,6 +69,7 @@ class PowerDomainConfig(DomainConfig):
 2.3 恢复送电前须确认故障点已隔离并具备送电条件。"""},
     ]
 
+    # 意图映射到电力 Skill 名
     def intent_to_skill(self, intent: str) -> str:
         mapping = {
             "spec_retrieval": "power_rag",

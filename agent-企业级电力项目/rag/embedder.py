@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 EMB_CACHE_MAX = 2048
 
 
+# BGE-M3嵌入提供者：懒加载单例，进程内文本→向量缓存
 class EmbeddingProvider:
     """BGE-M3 懒加载单例。首次加载 ~6s，之后 <1ms。
 
@@ -23,10 +24,12 @@ class EmbeddingProvider:
     后续直接命中缓存，避免重复向量化。OrderedDict FIFO 淘汰。
     """
 
+    # 初始化模型与缓存
     def __init__(self):
         self._model = None
         self._text_cache: "OrderedDict[str, list]" = OrderedDict()
 
+    # 懒加载并返回底层模型(首次加载较慢)
     def _get(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
@@ -39,6 +42,7 @@ class EmbeddingProvider:
             )
         return self._model
 
+    # 文本转向量：命中缓存直接复用，未命中才编码并写入缓存
     def encode(self, texts, normalize=True) -> list:
         model = self._get()
         if isinstance(texts, str):
@@ -55,6 +59,7 @@ class EmbeddingProvider:
                     self._text_cache.popitem(last=False)
         return [self._text_cache[t] for t in texts]
 
+    # 返回当前缓存条数(调试用)
     def cache_size(self) -> int:
         return len(self._text_cache)
 

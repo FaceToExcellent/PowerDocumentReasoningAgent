@@ -13,10 +13,12 @@ logger = logging.getLogger(__name__)
 RRF_K = 60
 
 
+# RRF融合：按排名倒数融合向量/关键词两路召回，去重合并来源
 def _rrf_merge(vector_hits: List[Dict], keyword_hits: List[Dict], top_k: int) -> List[Dict]:
     """Reciprocal Rank Fusion:按排名融合两路召回,去重合并来源。"""
     merged: Dict[str, Dict[str, Any]] = {}
 
+    # 单路命中累加进融合字典(按chunk_id去重)
     def _accumulate(hits: List[Dict], source: str):
         for rank, hit in enumerate(hits):
             doc = hit.get("doc", {})
@@ -41,6 +43,7 @@ def _rrf_merge(vector_hits: List[Dict], keyword_hits: List[Dict], top_k: int) ->
     return ranked[:top_k]
 
 
+# 从查询抽取关键词(电力业务词+ASCII词)，用于BM25直觉召回
 def _keyword_terms(query: str) -> List[str]:
     """从查询抽关键词(中文按业务词,ASCII 按 token)。"""
     import re
@@ -56,9 +59,11 @@ def _keyword_terms(query: str) -> List[str]:
     return list(dict.fromkeys(terms))
 
 
+# 统一RAG检索服务：向量+关键词召回、RRF融合、Rerank，兼容Milvus/Chroma
 class RAGService:
     """统一 RAG 检索：向量召回 + 关键词召回 + RRF 融合 + Rerank"""
 
+    # 按配置选择Milvus/Chroma向量库并初始化语料缓存
     def __init__(self):
         from rag.vector_store.milvus_store import MilvusVectorStore
         from rag.vector_store.chroma_store import ChromaVectorStore
@@ -69,6 +74,7 @@ class RAGService:
         self._corpus_cache: Optional[Dict[str, List[Dict]]] = None  # tenant_id -> docs(关键词召回用)
         logger.info(f"向量库模式: {settings.vector_store_type}")
 
+    # 加载租户文档语料(关键词召回用)，带缓存避免重复查询
     def _get_corpus(self, tenant_id: str) -> List[Dict]:
         """加载租户文档语料(关键词召回用),缓存避免重复查询。"""
         if self._corpus_cache is None or tenant_id not in self._corpus_cache:
@@ -97,6 +103,7 @@ class RAGService:
         return {"results": results, "total_found": len(results), "query": query,
                 "sources_dist": self._source_distribution(dense, keyword)}
 
+    # BM25直觉：关键词匹配文档title/source做稀疏召回，稀疏词加权
     def _keyword_retrieve(self, query: str, tenant_id: str, top_k: int) -> List[Dict]:
         """BM25 直觉:关键词匹配文档 title/source(向量库标量字段)。稀疏词加权。"""
         terms = _keyword_terms(query)
@@ -120,9 +127,11 @@ class RAGService:
         hits.sort(key=lambda h: h["keyword_score"], reverse=True)
         return hits[:top_k]
 
+    # 统计两路召回的命中数分布
     def _source_distribution(self, dense: List[Dict], keyword: List[Dict]) -> Dict[str, int]:
         return {"vector": len(dense), "keyword": len(keyword)}
 
+    # 对混合结果调用Reranker精排后返回TopK
     def _hybrid_and_rerank(self, query: str, hybrid_results: list, top_k: int) -> list:
         """Rerank:对混合结果精排(调用 Reranker,含 cross-encoder 可选)。"""
         if not hybrid_results:
@@ -134,12 +143,15 @@ class RAGService:
     def add_documents(self, docs: List[Dict[str, Any]], tenant_id: str = "") -> int:
         return self.store.add_documents(docs, tenant_id=tenant_id)
 
+    # 按租户删除全部文档
     def delete_by_tenant(self, tenant_id: str) -> bool:
         return self.store.delete_by_tenant(tenant_id)
 
+    # 统计文档数(可选租户)
     def count(self, tenant_id: str = "") -> int:
         return self.store.count(tenant_id)
 
+    # 按租户查询原始数据(管理/调试用)
     def query(self, tenant_id: str = "", limit: int = 20) -> list:
         return self.store.query(tenant_id=tenant_id, limit=limit)
 

@@ -14,7 +14,9 @@ QUOTA_RULES = {
 }
 
 
+# 定额匹配 Skill:区分新建/改造/大修工程造价系数
 class QuotaMatchSkill(BaseSkill):
+    # 元数据:定额匹配 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -25,6 +27,7 @@ class QuotaMatchSkill(BaseSkill):
             category="计算",
         )
 
+    # 执行定额匹配:识别工程类型并返回对应造价系数
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         project_type = "新建"

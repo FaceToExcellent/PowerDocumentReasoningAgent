@@ -7,15 +7,18 @@ from pathlib import Path
 from typing import Dict
 
 
+# 进程内指标采集器：计数器 + 直方图 + 定时落盘 JSON
 class MetricsCollector:
     """进程内指标计数 + 定时落盘 JSON（可被 Prometheus textfile / Grafana 读取）"""
 
+    # 初始化计数器/直方图字典、锁与启动时间
     def __init__(self):
         self._counters: Dict[str, float] = {}
         self._histograms: Dict[str, list] = {}
         self._lock = threading.Lock()
         self._start = time.time()
 
+    # 递增计数器，支持带 labels 的键
     def incr(self, name: str, value: float = 1, labels: dict = None):
         key = name
         if labels:
@@ -24,6 +27,7 @@ class MetricsCollector:
         with self._lock:
             self._counters[key] = self._counters.get(key, 0) + value
 
+    # 记录观测值（延迟等），写入直方图并限长
     def observe(self, name: str, value: float, labels: dict = None):
         """记录观测值（延迟等），进入直方图"""
         key = name
@@ -36,6 +40,7 @@ class MetricsCollector:
             if len(self._histograms[key]) > 2000:
                 self._histograms[key] = self._histograms[key][-2000:]
 
+    # 生成当前指标的 JSON 快照（含 p95 统计）
     def snapshot(self) -> dict:
         with self._lock:
             counters = dict(self._counters)
@@ -55,12 +60,14 @@ class MetricsCollector:
             "histograms": hist,
         }
 
+    # 静态方法：计算百分位数（p95 等）
     @staticmethod
     def _percentile(values, p):
         s = sorted(values)
         idx = min(len(s) - 1, int(len(s) * p))
         return round(s[idx], 2)
 
+    # 导出 Prometheus text 格式指标文本
     def to_prometheus_text(self) -> str:
         """导出 Prometheus text 格式（生产对接 /metrics）"""
         snap = self.snapshot()

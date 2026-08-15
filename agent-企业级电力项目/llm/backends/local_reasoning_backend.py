@@ -8,13 +8,16 @@ from llm.backends.local_small_backend import LocalSmallBackend
 logger = logging.getLogger(__name__)
 
 
+# 本地推理后端：基于 Ollama deepseek-r1，离线可拿 reasoning 思考
 class LocalReasoningBackend(LocalSmallBackend):
     """基于本地 deepseek-r1:7b，离线可拿思考（Ollama 原生返回 reasoning）"""
 
+    # 初始化推理后端，沿用本地小模型基类并标记后端名
     def __init__(self, model: str = "", base_url: str = ""):
         super().__init__(model or settings.local_reasoning_model, base_url)
         self.backend_name = "local_reasoning"
 
+    # 调用本地推理模型，提取 reasoning 并封装为 LLMResult
     async def ainvoke(self, messages: list, **kwargs) -> LLMResult:
         client = self._client()
         resp = await client.ainvoke(messages)

@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+# Hook 事件结构化载体,供 trace/审计读取
 class HookEvent:
     """单个 Hook 事件(结构化,供 trace/审计读取)。"""
 
+    # 初始化事件字段
     def __init__(self, hook_type: str, target_name: str, result: str,
                  reason: str, safe_summary: Dict[str, Any],
                  redacted: bool = False, degraded: bool = False):
@@ -23,6 +25,7 @@ class HookEvent:
         self.redacted = redacted
         self.degraded = degraded
 
+    # 将事件转成字典供审计读取
     def to_dict(self) -> Dict[str, Any]:
         return {
             "hook_type": self.hook_type, "target_name": self.target_name,
@@ -32,9 +35,11 @@ class HookEvent:
         }
 
 
+# Skill 生命周期治理点集合
 class SkillHooks:
     """Skill 生命周期治理点。"""
 
+    # 初始化事件列表与已触达 Skill 集合
     def __init__(self):
         self.events: List[HookEvent] = []
         self.touched_skills: set = set()
@@ -92,6 +97,7 @@ class SkillHooks:
         self.events.append(event)
         return event
 
+    # 识别应省略的内部字段
     @staticmethod
     def _collect_omitted(result: Dict[str, Any]) -> List[str]:
         """识别应省略的内部字段(诊断/内部细节不进上下文)。"""

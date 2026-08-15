@@ -13,7 +13,9 @@ _PREFIX = "rag:v2:"
 _INDEX_VERSION_KEY = "rag:index_version"
 
 
+# RAG 语义缓存管理器,支持租户隔离与索引版本指纹
 class RAGCacheManager:
+    # 初始化 TTL 与进程内版本缓存
     def __init__(self):
         self.ttl = settings.rag_cache_ttl
         # 进程内版本缓存(避免每请求读 Redis)
@@ -36,6 +38,7 @@ class RAGCacheManager:
             logger.warning(f"索引指纹计算失败: {e}")
             return "unknown"
 
+    # 读取当前索引版本(带进程缓存,减少 Redis 压力)
     async def get_index_version(self, tenant_id: str = "") -> str:
         """读取当前索引版本(带进程缓存,减少 Redis 压力)。"""
         cache_key = f"{_INDEX_VERSION_KEY}:{tenant_id}"
@@ -48,6 +51,7 @@ class RAGCacheManager:
         self._version_cache[tenant_id] = (version, time.time())
         return version
 
+    # 重建索引版本并失效该租户检索缓存
     async def rebuild_index(self, tenant_id: str = "") -> str:
         """重建索引版本 + 失效该租户检索缓存(旧知识不继续被复用)。"""
         new_version = await self.compute_index_fingerprint(tenant_id)
@@ -58,6 +62,7 @@ class RAGCacheManager:
         logger.info(f"🔄 索引重建: tenant={tenant_id} version={new_version}")
         return new_version
 
+    # 构造语义缓存 key(含索引版本指纹)
     @staticmethod
     def build_cache_key(user_input: str, intent: str, top_k: int = 5,
                         tenant_id: str = "", index_version: str = "") -> str:
@@ -65,12 +70,15 @@ class RAGCacheManager:
         # ⭐ 索引版本进缓存 key:知识更新后旧缓存自动失效
         return f"{_PREFIX}{tenant_id}:{intent}:{index_version}:{qh}:k{top_k}"
 
+    # 读取缓存
     async def get(self, key: str) -> dict | None:
         return await cache_service.get(key)
 
+    # 写入缓存(带默认 TTL)
     async def set(self, key: str, value: dict, ttl: int = None) -> bool:
         return await cache_service.set(key, value, ttl=ttl or self.ttl)
 
+    # 文档变更后失效对应 intent 缓存
     async def invalidate(self, intent: str = "", tenant_id: str = ""):
         """文档变更后失效对应 intent 缓存（简化：清整个前缀，生产按 pattern 删）"""
         logger.info(f"RAG 缓存失效: intent={intent} tenant={tenant_id}")

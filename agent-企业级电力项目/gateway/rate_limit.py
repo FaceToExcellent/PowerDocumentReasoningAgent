@@ -11,7 +11,9 @@ from config.cache import cache_service
 logger = logging.getLogger(__name__)
 
 
+# 网关限流中间件：滑动窗口限制每租户每路径的请求频率
 class RateLimitMiddleware(BaseHTTPMiddleware):
+    # 请求入口：按租户+路径滑动窗口计数，超限返回 429
     async def dispatch(self, request: Request, call_next):
         if not settings.gateway_enabled:
             return await call_next(request)

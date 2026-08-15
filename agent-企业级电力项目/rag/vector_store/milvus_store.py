@@ -22,27 +22,32 @@ from rag.embedder import embedding_provider
 logger = logging.getLogger(__name__)
 
 
+# Milvus向量库适配：分区+expr双重租户隔离，单collection多分区
 class MilvusVectorStore:
     COLLECTION = "power_docs"
     PARTITION_PREFIX = "tenant_"      # 每个租户一个分区
     DIM = settings.milvus_dim         # BGE-M3 输出维度 1024
 
+    # 初始化URI、确保数据目录并建立连接
     def __init__(self):
         self.client: Optional[MilvusClient] = None
         self._uri = settings.milvus_db_uri
         self._ensure_db_dir()
         self._connect()
 
+    # 本地模式确保db文件父目录存在
     def _ensure_db_dir(self):
         # pymilvus 3.x 本地模式：.db 文件路径，确保父目录存在
         if not self._uri.startswith(("tcp://", "http://", "https://")):
             Path(self._uri).parent.mkdir(parents=True, exist_ok=True)
 
+    # 建立MilvusClient连接并确保collection就绪
     def _connect(self):
         self.client = MilvusClient(uri=self._uri)
         self._ensure_collection()
         logger.info(f"✅ Milvus 连接成功: {self._uri} (collection={self.COLLECTION})")
 
+    # 确保collection存在：建schema、HNSW索引并load
     def _ensure_collection(self):
         if not self.client.has_collection(self.COLLECTION):
             schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
@@ -70,6 +75,7 @@ class MilvusVectorStore:
             except Exception:
                 pass
 
+    # 确保租户分区存在，返回分区名(租户隔离第一道)
     def _ensure_partition(self, tenant_id: str) -> str:
         """确保租户分区存在。partition_names 隔离第一道"""
         partition = f"{self.PARTITION_PREFIX}{tenant_id}"
@@ -125,6 +131,7 @@ class MilvusVectorStore:
             })
         return out
 
+    # 优先从动态字段取content，否则回退到id编码的摘要
     def _load_content(self, doc_id: str, entity: dict) -> str:
         """优先从动态字段取 content，否则从 id 反查（id 里编码了内容摘要）"""
         return entity.get("content", doc_id)
@@ -165,6 +172,7 @@ class MilvusVectorStore:
         self.client.flush(self.COLLECTION)
         return inserted
 
+    # 按租户过滤删除全部文档
     def delete_by_tenant(self, tenant_id: str) -> bool:
         try:
             self.client.delete(self.COLLECTION, filter=f'tenant_id == "{tenant_id}"')
@@ -173,12 +181,14 @@ class MilvusVectorStore:
             logger.error(f"删除租户数据失败: {e}")
             return False
 
+    # 按id列表删除文档
     def delete_by_ids(self, ids: List[str]):
         try:
             self.client.delete(self.COLLECTION, ids=ids)
         except Exception as e:
             logger.error(f"按 id 删除失败: {e}")
 
+    # 统计文档数(可选按租户过滤)
     def count(self, tenant_id: str = "") -> int:
         try:
             if tenant_id:
@@ -187,6 +197,7 @@ class MilvusVectorStore:
         except Exception:
             return 0
 
+    # 按租户查询原始数据(管理/调试用)
     def query(self, tenant_id: str = "", limit: int = 20) -> list:
         """按租户查原始数据（管理/调试用）"""
         try:

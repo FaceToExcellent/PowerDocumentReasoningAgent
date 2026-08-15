@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/agent-企业级电力项目/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/agent-企业级电力项目"
+  ]
+}

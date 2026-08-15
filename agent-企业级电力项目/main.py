@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
+# 打印启动横幅
 def _banner():
     print(r"""
   ╔══════════════════════════════════════════╗
@@ -27,6 +28,7 @@ def _banner():
 """)
 
 
+# 环境预检：检查 Redis / Ollama / Milvus / DeepSeek 可用性
 def _env_check():
     from config.settings import settings
     print("🔍 环境预检 …")
@@ -36,6 +38,7 @@ def _env_check():
     import redis.asyncio as aioredis
     import asyncio
     try:
+        # 异步 ping Redis 以验证连通性
         async def _p():
             r = aioredis.Redis(host=settings.redis_host, port=settings.redis_port, db=settings.redis_db)
             await r.ping(); await r.aclose()
@@ -72,6 +75,7 @@ def _env_check():
     return fail == 0
 
 
+# 主入口：解析参数、环境预检、按需灌数据并启动 uvicorn 服务
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="电力智能运维 Agent 企业版")

@@ -10,7 +10,9 @@ _INTENT_SYNONYMS = {
 }
 
 
+# 查询扩展器：按意图补充同义词关键词
 class QueryExpander:
+    # 按意图在原始查询上追加同义词，最多返回3条变体
     def expand(self, query: str, intent: str = "") -> List[str]:
         queries = [query]
         if intent and intent in _INTENT_SYNONYMS:

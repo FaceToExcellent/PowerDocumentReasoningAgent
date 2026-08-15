@@ -13,12 +13,15 @@ from config.settings import settings
 from config.logging_config import logger
 
 
+# 消息流水存储：chat_message 三 ID 表读写
 class MessageStore:
+    # 初始化数据库路径、加锁并建表
     def __init__(self, db_path: str = None):
         self._db_path = db_path or settings.sqlite_audit_db
         self._lock = threading.Lock()
         self._init_db()
 
+    # 初始化 SQLite 库，创建 chat_message 表及索引
     def _init_db(self):
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._lock, sqlite3.connect(self._db_path) as conn:
@@ -67,6 +70,7 @@ class MessageStore:
         msgs = [dict(r) for r in reversed(rows)]
         return msgs
 
+    # 查询整条会话流水
     def get_thread(self, *, tenant_id="", user_id="", thread_id="") -> List[Dict]:
         """整条会话流水"""
         with self._lock, sqlite3.connect(self._db_path) as conn:
@@ -78,6 +82,7 @@ class MessageStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # 按 reply_id 精确回溯多段消息
     def get_by_reply(self, *, tenant_id="", thread_id="", reply_id="") -> List[Dict]:
         """按 reply_id 精确回溯（thinking + 正文 + 工具调用多段）"""
         with self._lock, sqlite3.connect(self._db_path) as conn:
@@ -89,6 +94,7 @@ class MessageStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # 轻量语义召回：按关键词匹配最近消息
     def semantic_search(self, *, tenant_id="", user_id="", query="", top_k=5) -> List[Dict]:
         """轻量语义召回：关键词匹配最近消息（本机无向量版；生产可接 Milvus 记忆向量）"""
         kws = [k for k in query[:8] if len(k) > 1]

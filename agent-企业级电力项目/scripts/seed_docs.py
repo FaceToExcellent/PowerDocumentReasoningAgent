@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
+# 按领域灌入演示文档并返回入库片数
 def seed_demo_docs(tenant_id: str = "default", domain_name: str = None):
     from config.settings import settings
     from config.domain import get_domain

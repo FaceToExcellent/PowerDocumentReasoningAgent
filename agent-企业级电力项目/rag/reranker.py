@@ -11,10 +11,13 @@ from typing import List, Dict, Any
 logger = logging.getLogger(__name__)
 
 
+# 重排器：cross-encoder精排(可选) + 本地规则兜底
 class Reranker:
+    # 初始化模型槽位
     def __init__(self):
         self._model = None
 
+    # 懒加载cross-encoder重排模型，失败返回False走本地兜底
     def _load_model(self):
         """懒加载 cross-encoder(bge-reranker)。失败返回 None,走本地兜底。"""
         if self._model is not None:
@@ -30,6 +33,7 @@ class Reranker:
             self._model = False  # 标记不可用
         return self._model
 
+    # 对初召回候选精排，返回TopK带rerank_score的结果
     def rerank(self, query: str, results: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
         if not results:
             return []

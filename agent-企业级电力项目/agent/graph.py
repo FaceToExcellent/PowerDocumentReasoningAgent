@@ -117,6 +117,7 @@ async def cache_check_node(state: AgentState) -> dict:
     return {"cache_hit": False}
 
 
+# 根据用户输入关键词打分,返回得分最高的意图
 def _guess_intent(user_input: str) -> str:
     scores = {}
     for intent, kws in INTENT_KEYWORDS.items():
@@ -253,6 +254,18 @@ def _build_kg_evidence(user_input: str) -> str:
         return ""
 
 
+# parallel 分支首次执行时把单意图结果写入 sub_results,供 aggregate 汇总
+def _parallel_sub_result(state, intent, output):
+    """parallel 分支结束时把结果写进 sub_results（reducer 自动累加），供 aggregate 汇总。
+    仅首次执行写，避免 fact_check 重试循环里重复累加旧结果。"""
+    plan = state.get("routing_plan") or {}
+    if (plan.get("mode") == "parallel" and len(plan.get("intents", [])) > 1
+            and not state.get("fact_check_feedback")):
+        return {"sub_results": [{"intent": intent, "agent_output": output}]}
+    return {}
+
+
+# 核心推理节点:组装上下文与消息,走 Skill/HITL/流式或非流式 LLM 调用
 async def agent_execute_node(state: AgentState) -> dict:
     intent = state.get("intent", "chat")
     user_input = state.get("user_input", "")
@@ -369,9 +382,11 @@ async def agent_execute_node(state: AgentState) -> dict:
         "agent_output": output,
         "confidence": confidence,
         "iteration_count": state.get("iteration_count", 0) + 1,
+        **_parallel_sub_result(state, intent, output),
     }
 
 
+# 执行对比分析 Skill,附带 Hooks 治理与 Tool Calling 记录
 async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     skill = skill_registry.get("comparison_analysis")
     if not skill:
@@ -398,6 +413,7 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     return fallback_output
 
 
+# 流式执行 LLM 推理,逐 token 推送到队列,失败自动重试并兜底
 async def _agent_execute_stream(state, task, messages, queue, user_id, thread_id, intent):
     """流式执行：逐 token 推送，同时累积最终内容。
 
@@ -439,6 +455,7 @@ async def _agent_execute_stream(state, task, messages, queue, user_id, thread_id
         "agent_output": collected,
         "confidence": 0.7,
         "iteration_count": state.get("iteration_count", 0) + 1,
+        **_parallel_sub_result(state, intent, collected),
     }
 
 
@@ -582,6 +599,7 @@ def hitl_review_node(state: AgentState) -> dict:
     return result
 
 
+# 人工确认后路由:approve 回 agent_execute,否则直接 memory_write 结束
 def route_after_hitl(state: AgentState) -> str:
     """人工确认后：approve → 回到 agent_execute 继续执行；否则直接结束"""
     if state.get("human_action") == "approve":
@@ -594,6 +612,7 @@ def route_after_cache(state: AgentState) -> str:
     return "execution_log" if state.get("cache_hit") else "supervisor"
 
 
+# FactCheck 后路由:超时/通过/超迭代去 memory_write,否则回 agent_execute 重试
 def route_after_fact_check(state: AgentState) -> str:
     # 超时强制结束
     if time.time() - state.get("start_time", time.time()) > settings.graph_timeout_seconds:
@@ -605,6 +624,7 @@ def route_after_fact_check(state: AgentState) -> str:
     return "memory_write"
 
 
+# agent_execute 后路由:高危转 hitl_review,parallel 转 aggregate,否则 fact_check
 def route_after_agent(state: AgentState) -> str:
     """agent_execute 后：高危需人工确认 → hitl_review；parallel 等子结果 → aggregate；否则 fact_check"""
     if state.get("need_human_confirm"):
@@ -632,6 +652,7 @@ def fan_out_parallel(state: AgentState) -> list:
     return sends
 
 
+# 汇总 parallel 子结果:拼接后一次汇总 LLM,失败降级为拼接
 async def aggregate_node(state: AgentState) -> dict:
     """汇总子结果：拼接 + 一次汇总 LLM（可降级为拼接）"""
     outputs = [s.get("agent_output", "") for s in state.get("sub_results", []) if s]
@@ -688,6 +709,7 @@ def build_graph():
 agent_graph = None
 
 
+# 初始化 checkpointer 并编译图(在 event loop 内调用一次)
 async def init_graph() -> None:
     """初始化 checkpointer 并编译图（在 event loop 内调用一次）"""
     global agent_graph
@@ -705,6 +727,7 @@ async def _ensure_graph():
     return agent_graph
 
 
+# 入口:建 state、复用 checkpoint、调用图并返回结构化结果
 async def run_agent(user_input: str, thread_id: str = None, account: str = "anonymous",
                     employee_id: str = "", tenant_id: str = "default", user_id: str = ""):
     start = time.time()
@@ -765,6 +788,7 @@ async def run_agent(user_input: str, thread_id: str = None, account: str = "anon
 _IDEMPOTENCY_DONE: set = set()
 
 
+# 幂等校验:返回 True 表示该幂等键已处理过,应拦截重复提交
 def _idempotency_guard(idempotency_key: str) -> bool:
     """返回 True 表示该幂等键已被处理过(应拦截)。原子性由进程内 set 保证。"""
     if not idempotency_key:
@@ -775,6 +799,7 @@ def _idempotency_guard(idempotency_key: str) -> bool:
     return False
 
 
+# HITL 恢复:以 Command(resume) 继续执行,带幂等防重复
 async def resume_agent(thread_id: str, decision: dict):
     """HITL 恢复：Command(resume) 作为 input 传入（langgraph 1.2 签名）
 
@@ -805,6 +830,7 @@ async def resume_agent(thread_id: str, decision: dict):
         return {"success": False, "error": str(e)}
 
 
+# 崩溃恢复:从最近 checkpoint 回放续跑未完成线程
 async def recover_thread(thread_id: str, decision: dict = None) -> dict:
     """崩溃恢复：进程 crash 后从最近 checkpoint 重新拉起未完成线程。
 

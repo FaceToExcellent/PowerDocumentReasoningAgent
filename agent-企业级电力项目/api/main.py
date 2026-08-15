@@ -24,6 +24,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # ── 生命周期 ──────────────────────────────────────
+# 应用生命周期:启动时初始化 OTel/缓存/图,关闭时清理资源
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("⚡ 电力智能运维 Agent v5.0（企业版）启动中…")
@@ -76,6 +77,7 @@ app.add_middleware(RateLimitMiddleware)
 
 
 # ── 数据模型 ──────────────────────────────────────
+# 聊天请求体:消息内容与租户/用户等上下文信息
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     thread_id: str = ""
@@ -84,6 +86,7 @@ class ChatRequest(BaseModel):
     tenant_id: str = "default"
 
 
+# HITL 人工确认请求体:审批动作与恢复凭证
 class HumanConfirmRequest(BaseModel):
     thread_id: str
     action: str = "approve"       # approve / reject / modify
@@ -94,6 +97,7 @@ class HumanConfirmRequest(BaseModel):
 
 
 # ── 健康检查 ──────────────────────────────────────
+# 健康检查接口:返回 Redis/向量库/模型配置状态
 @app.get("/health")
 async def health():
     redis_ok = await cache_service.health_check()
@@ -103,6 +107,7 @@ async def health():
 
 
 # ── 普通对话 ──────────────────────────────────────
+# 普通对话接口:调用 Agent 图并返回结果
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request = None):
     from agent.graph import run_agent
@@ -117,6 +122,7 @@ async def chat(req: ChatRequest, request: Request = None):
 
 
 # ── SSE 流式对话（sse-starlette，提前推 token_stat）──
+# SSE 流式对话接口:边跑图边推送 token/回复等事件
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request = None):
     from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -129,6 +135,7 @@ async def chat_stream(req: ChatRequest, request: Request = None):
     abort_event = asyncio.Event()
     _ABORT_EVENT[thread_id] = abort_event
 
+    # SSE 事件生成器:推送 token_stat/图完成等事件
     async def event_generator():
         token_queue: asyncio.Queue = asyncio.Queue()
         token_ctx = STREAM_QUEUE.set(token_queue)
@@ -150,6 +157,7 @@ async def chat_stream(req: ChatRequest, request: Request = None):
     return EventSourceResponse(event_generator(), ping=15)
 
 
+# 流式执行 Agent 图并消费 token 队列,产出 SSE 事件
 async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_event):
     from agent.state import create_initial_state
     from agent.graph import _ensure_graph, STREAM_QUEUE, _ABORT_EVENT
@@ -258,6 +266,7 @@ async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_
 
 
 # ── 取消 ──────────────────────────────────────────
+# 取消对话接口:置位中止事件通知图执行停止
 @app.post("/chat/abort")
 async def abort_chat(req: ChatRequest):
     from agent.graph import _ABORT_EVENT
@@ -268,6 +277,7 @@ async def abort_chat(req: ChatRequest):
 
 
 # ── HITL 人工确认恢复 ─────────────────────────────
+# HITL 人工确认接口:校验凭证并恢复高危操作
 @app.post("/chat/human-confirm")
 async def human_confirm(req: HumanConfirmRequest):
     from agent.graph import resume_agent
@@ -285,6 +295,7 @@ async def human_confirm(req: HumanConfirmRequest):
 
 
 # ── 崩溃恢复：进程 crash 后从 checkpoint 重新拉起未完成线程 ──
+# 崩溃恢复接口:从 checkpoint 重新拉起未完成线程
 @app.post("/chat/recover")
 async def chat_recover(req: HumanConfirmRequest):
     from agent.graph import recover_thread
@@ -297,6 +308,7 @@ async def chat_recover(req: HumanConfirmRequest):
 
 
 # ── 文档上传（异步，MQ 消费）──────────────────────
+# 文档上传接口:切分入库并返回处理结果
 @app.post("/docs/upload")
 async def upload_doc(file: UploadFile = File(...), tenant_id: str = Header("default")):
     """上传文档：保存文件 → 发 MQ 消息 → 立即返回处理中"""
@@ -313,6 +325,7 @@ async def upload_doc(file: UploadFile = File(...), tenant_id: str = Header("defa
             "chunks": n, "status": "completed", "msg": "文档已入库"}
 
 
+# 文档列表接口:按租户返回已入库文档
 @app.get("/docs/list")
 async def list_docs(tenant_id: str = Header("default")):
     from rag.retriever import rag_service
@@ -321,12 +334,14 @@ async def list_docs(tenant_id: str = Header("default")):
 
 
 # ── 指标 / 审计 / 记忆 ────────────────────────────
+# 指标快照接口:返回当前运行指标
 @app.get("/metrics")
 async def metrics_endpoint():
     from observability.metrics import metrics
     return metrics.snapshot()
 
 
+# Prometheus 指标接口:输出文本格式指标
 @app.get("/metrics/prometheus")
 async def metrics_prometheus():
     from observability.metrics import metrics
@@ -334,12 +349,14 @@ async def metrics_prometheus():
     return PlainTextResponse(metrics.to_prometheus_text())
 
 
+# 审计记录查询接口:返回最近聊天审计日志
 @app.get("/audit/chats")
 async def audit_chats(limit: int = 20):
     from observability.audit import audit_logger
     return {"success": True, "data": audit_logger.query("audit_chat", limit=limit)}
 
 
+# 获取线程记忆接口:返回指定线程的消息记录
 @app.get("/memory/threads/{thread_id}")
 async def get_memory(thread_id: str):
     from memory.message_store import message_store
@@ -348,6 +365,7 @@ async def get_memory(thread_id: str):
 
 
 # ── 回归评测(证据治理层) ──────────────────────────
+# 回归评测接口:运行固定 case 并返回评测报告
 @app.post("/eval/run")
 async def eval_run(body: dict = None):
     """固定 case 回归评测 — 每次改 Prompt/检索/模型后必跑"""

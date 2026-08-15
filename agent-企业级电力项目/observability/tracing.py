@@ -24,19 +24,24 @@ except ImportError:  # pragma: no cover - 依赖未装时的降级路径
 _manual_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
 
 
+# OTel 缺失时的 no-op span，兼容 with 语法
 class _NoopSpan:
     """OTel 缺失时的 no-op span，兼容 `with tracer.span(...)` 语法"""
 
+    # 进入上下文管理器，返回自身
     def __enter__(self):
         return self
 
+    # 退出上下文管理器，不吞异常
     def __exit__(self, *exc):
         return False
 
 
+# 追踪器：保持旧 API tracer.span(name, **attrs)
 class Tracer:
     """保持旧 API：tracer.span(name, **attrs)"""
 
+    # 开启一个 span（OTel 用 start_as_current_span，否则返回 no-op）
     def span(self, name: str, **attrs):
         if not HAS_OTEL:
             return _NoopSpan()
@@ -47,6 +52,7 @@ class Tracer:
 tracer = Tracer()
 
 
+# 获取当前 span 的 trace_id（无 OTel 时读 contextvar）
 def get_trace_id() -> str:
     if not HAS_OTEL:
         return _manual_trace_id.get()
@@ -56,15 +62,18 @@ def get_trace_id() -> str:
     return format(ctx.trace_id, "032x")
 
 
+# 手动设置 trace_id（仅无 OTel 的降级路径使用）
 def set_trace_id(tid: str) -> None:
     """OTel 模式下由根 span 决定 trace_id，此函数仅用于降级路径。"""
     _manual_trace_id.set(tid)
 
 
+# 生成新的随机 trace_id
 def new_trace_id() -> str:
     return uuid.uuid4().hex
 
 
+# 为一次 HTTP 请求创建 OTel 根 span（支持 traceparent 桥接）
 def request_span(request, **attrs):
     """为一次 HTTP 请求创建 OTel 根 span。
 
@@ -82,6 +91,7 @@ def request_span(request, **attrs):
         "http_request", context=ctx, attributes=attrs or None)
 
 
+# 将旧 X-Trace-ID 桥接为 W3C traceparent 格式
 def _legacy_to_traceparent(tid: str) -> str:
     """旧 X-Trace-ID(<=16 hex) → W3C traceparent 格式，span_id 用占位。"""
     return f"00-{tid:0>32}-0000000000000001-01"

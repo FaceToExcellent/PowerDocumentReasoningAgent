@@ -38,7 +38,9 @@ _ERROR_POLICY: Dict[str, Dict[str, Any]] = {
 }
 
 
+# 降级决策结果:分类/是否重试/下一步动作/兜底话术
 class DegradationDecision:
+    # 初始化降级决策字段
     def __init__(self, category: str, retry: bool = False, max_attempts: int = 1,
                  next_action: str = "fallback_answer", fallback_message: str = ""):
         self.category = category
@@ -47,6 +49,7 @@ class DegradationDecision:
         self.next_action = next_action
         self.fallback_message = fallback_message
 
+    # 序列化为字典
     def to_dict(self) -> Dict[str, Any]:
         return {
             "error_category": self.category, "retry": self.retry,
@@ -55,6 +58,7 @@ class DegradationDecision:
         }
 
 
+# 把异常归类为 8 类错误之一
 def classify_error(err: Exception) -> str:
     """把异常归类为 8 类错误。"""
     msg = str(err).lower()
@@ -69,6 +73,7 @@ def classify_error(err: Exception) -> str:
     return "system_error"
 
 
+# 错误分类 → 降级决策(只读工具才允许重试)
 def degradation_policy(category: str, *, is_read_only: bool = True) -> DegradationDecision:
     """错误分类 → 降级决策(决策层)。"""
     policy = _ERROR_POLICY.get(category, _ERROR_POLICY["system_error"])

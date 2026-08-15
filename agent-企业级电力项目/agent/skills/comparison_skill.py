@@ -25,7 +25,9 @@ _COMPARE_PROMPT = """你是电力分析助理。请对下面两个对象做结�
 最后给出总结论，并明确标注：哪些是【事实】（有证据）、哪些是【推演】（推测+建议核实）。"""
 
 
+# 对比/影响分析 Skill:拆实体对→检索→维度化推理→结论分级
 class ComparisonAnalysisSkill(BaseSkill):
+    # 元数据:对比分析 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -36,6 +38,7 @@ class ComparisonAnalysisSkill(BaseSkill):
             category="分析",
         )
 
+    # 执行对比分析:抽取实体、检索证据、调用 LLM 维度推理
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         user_ctx = context.get("user_context", {})
@@ -75,6 +78,7 @@ class ComparisonAnalysisSkill(BaseSkill):
             "confidence": 0.7,
         }
 
+    # 从查询中抽取待对比的电力设备实体(简化的关键词抽取)
     @staticmethod
     def _extract_entities(query: str) -> List[str]:
         """简化抽取：常见电力设备词 + 用'和/与/换成/对比'分隔"""
@@ -85,6 +89,7 @@ class ComparisonAnalysisSkill(BaseSkill):
                 candidates.append(kw)
         return candidates[:2]
 
+    # 多域检索证据(复用 RAG 服务,失败时降级返回)
     async def _retrieve_evidence(self, query: str, tenant_id: str) -> str:
         try:
             from rag.retriever import rag_service

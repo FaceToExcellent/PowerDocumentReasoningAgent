@@ -8,7 +8,9 @@ from agent.harness.risk_level import RiskLevel
 logger = logging.getLogger(__name__)
 
 
+# 电力 RAG 检索 Skill:从向量库检索规程/图纸/造价等文档(带租户隔离)
 class PowerRAGSkill(BaseSkill):
+    # 元数据:电力 RAG 检索 Skill 的名称/描述/标签等
     @property
     def metadata(self) -> SkillMetadata:
         return SkillMetadata(
@@ -19,6 +21,7 @@ class PowerRAGSkill(BaseSkill):
             category="检索",
         )
 
+    # 执行检索:查询向量库,低置信时回退不硬答
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query = context.get("query", "")
         top_k = context.get("top_k", 5)

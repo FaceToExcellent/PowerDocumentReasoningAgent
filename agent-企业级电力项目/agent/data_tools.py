@@ -8,14 +8,18 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path("./data/power.db")
 
 
+# 电力业务数据查询工具(设备台账/故障记录/造价数据)
 class DataTools:
+    # 初始化数据库路径并建表
     def __init__(self):
         self.db_path = str(DB_PATH)
         self._ensure_tables()
 
+    # 建立数据库连接
     def _connect(self):
         return sqlite3.connect(self.db_path)
 
+    # 建表并写入演示数据
     def _ensure_tables(self):
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -57,6 +61,7 @@ class DataTools:
                     "'线路',1250.5,800.3,200.1,'2024-05','data/jn_110kv.xlsx')")
             conn.commit()
 
+    # 按类型/电压等级查询设备台账
     def query_equipment(self, device_type: str = None, voltage_level: str = None,
                         tenant_id: str = "default") -> List[Dict]:
         conn = self._connect()
@@ -71,6 +76,7 @@ class DataTools:
         conn.close()
         return [dict(r) for r in rows]
 
+    # 按设备/数量查询故障记录(时间倒序)
     def query_fault_records(self, device_id: str = None, limit: int = 20,
                             tenant_id: str = "default") -> List[Dict]:
         conn = self._connect()
@@ -86,6 +92,7 @@ class DataTools:
         conn.close()
         return [dict(r) for r in rows]
 
+    # 按电压等级查询造价数据(时间倒序)
     def query_cost_data(self, voltage_level: str = None, limit: int = 20,
                         tenant_id: str = "default") -> List[Dict]:
         conn = self._connect()

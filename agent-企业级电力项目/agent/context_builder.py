@@ -22,9 +22,11 @@ TRUST_RANK = {
 }
 
 
+# 一条上下文,带来源与信任等级
 class ContextItem:
     """一条上下文,带来源与信任等级。"""
 
+    # 初始化上下文字段并计算信任等级
     def __init__(self, source_type: str, content: str, *, key: str = "",
                  facts: Optional[Dict[str, Any]] = None, priority: int = 0):
         self.source_type = source_type
@@ -34,18 +36,22 @@ class ContextItem:
         self.priority = priority  # 同来源内部排序(高优先在前)
         self.trust = TRUST_RANK.get(source_type, 10)
 
+    # 序列化为字典
     def to_dict(self) -> Dict[str, Any]:
         return {"source_type": self.source_type, "content": self.content,
                 "key": self.key, "trust": self.trust}
 
 
+# 统一上下文入口:支持多来源 add/冲突解决/渲染
 class ContextBuilder:
     """统一上下文入口:add 多来源 → resolve_conflicts → render。"""
 
+    # 初始化条目与冲突记录
     def __init__(self):
         self._items: List[ContextItem] = []
         self._conflicts: List[Dict[str, Any]] = []
 
+    # 添加一条上下文,支持链式调用
     def add(self, source_type: str, content: str, *, key: str = "",
             facts: Optional[Dict[str, Any]] = None, priority: int = 0) -> "ContextBuilder":
         if content:
@@ -53,6 +59,7 @@ class ContextBuilder:
                                            facts=facts, priority=priority))
         return self
 
+    # 按信任等级解决同 key 冲突
     def resolve_conflicts(self) -> "ContextBuilder":
         """按信任等级解决冲突:同一 key 出现多次,高信任覆盖低信任。"""
         # 按 key 分组,保留 trust 最高 + priority 最高的那条
@@ -78,6 +85,7 @@ class ContextBuilder:
         self._items.sort(key=lambda it: (-it.trust, -it.priority))
         return self
 
+    # 渲染成 system 上下文文本(信任高在前)
     def render(self) -> str:
         """渲染成 system 上下文文本(信任高在前)。"""
         if not self._items:
@@ -106,6 +114,7 @@ class ContextBuilder:
             "compressed_summary": summary if dropped else "",
         }
 
+    # 输出压缩/选择报告
     def report(self) -> Dict[str, Any]:
         return {
             "selected_items": [it.to_dict() for it in self._items],
@@ -114,6 +123,7 @@ class ContextBuilder:
         }
 
 
+# 构建 Runtime Context 双通道视图(模型可见/系统专用)
 def build_runtime_context_view(*, tenant_id: str = "", user_id: str = "",
                                nickname: str = "", member_level: str = "",
                                page_context: Dict[str, Any] | None = None,

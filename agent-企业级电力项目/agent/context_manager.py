@@ -6,9 +6,11 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 
+# 上下文管理器:维护 recent_rounds 与实体抽取
 class ContextManager:
     """保留最小职责：recent_rounds 更新与实体抽取；长对话记忆归 memory 模块管"""
 
+    # 抽取电力设备/电压等级实体
     def extract_entities(self, text: str) -> List[str]:
         """抽取电力设备/电压等级实体（简化规则）"""
         entities = []
@@ -19,6 +21,7 @@ class ContextManager:
             entities.append(v)
         return list(set(entities))
 
+    # 追加一轮对话并截断到最近 max_rounds 轮
     def update_recent_rounds(self, rounds: List[Dict], user_input: str, agent_output: str,
                              max_rounds: int = 8) -> List[Dict]:
         rounds = list(rounds)

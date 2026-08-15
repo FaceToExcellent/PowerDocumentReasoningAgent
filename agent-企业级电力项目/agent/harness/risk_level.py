@@ -2,6 +2,7 @@
 from enum import Enum
 
 
+# 风险等级枚举(低/中/高/严重)
 class RiskLevel(Enum):
     LOW = "low"            # 查询/检索：自动执行
     MEDIUM = "medium"      # 生成报告/分析：自动 + 提示
@@ -24,6 +25,7 @@ INTENT_RISK_MAP = {
 }
 
 
+# 按 skill 名或意图名查询风险等级(未登记默认 LOW)
 def get_risk_level(skill_or_intent: str) -> RiskLevel:
     """按 skill 名或意图名查风险等级（未登记默认 LOW）"""
     if skill_or_intent in HIGH_RISK_SKILLS:
