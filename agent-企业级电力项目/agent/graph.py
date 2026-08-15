@@ -287,6 +287,16 @@ async def agent_execute_node(state: AgentState) -> dict:
             f"{it.get('doc',{}).get('content','')[:300]}"
             for it in state["rag_results"][:5])
 
+    # ⭐ 分源扫描:检索到的文档先过 Prompt 注入防护,再进上下文(防文档内嵌间接注入)
+    if evidence:
+        from safety.prompt_guard import ExternalText, scan_external_text
+        rag_scan = scan_external_text(ExternalText("rag", evidence, "rag_evidence"))
+        if rag_scan.categories:
+            state["security_events"] = list(state.get("security_events") or [])
+            state["security_events"].append(
+                f"prompt_injection_guard:rag_tainted={rag_scan.categories}")
+            evidence = rag_scan.sanitized_content
+
     # ⭐ KG 关系证据：从用户输入抽实体 → 查一跳关系 → 拼入证据（复杂推理）
     kg_evidence = _build_kg_evidence(user_input)
 

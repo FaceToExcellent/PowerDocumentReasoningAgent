@@ -24,6 +24,10 @@ class DomainConfig(ABC):
     demo_docs: List[Dict] = []
     chat_intent: str = "chat"
 
+    # Prompt 注入防护：领域扩展标记（叠加在 settings.safety_*_markers 之上）
+    injection_markers: List[str] = []
+    secret_markers: List[str] = []
+
     # 返回当前领域支持的意图关键词列表
     def get_intents(self) -> List[str]:
         return list(self.intent_keywords.keys())

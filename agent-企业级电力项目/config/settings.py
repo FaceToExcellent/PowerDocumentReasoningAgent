@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     gateway_api_key: str = ""          # 预留：MCP/租户 API Key（本机默认空=放行）
     rate_limit_per_minute: int = 60    # 单租户每分钟限流
 
+    # ── Prompt 注入防护基础标记（领域扩展见 DomainConfig.injection_markers）──
+    safety_injection_markers: List[str] = [
+        "忽略", "忽略规则", "跳过", "跳过审批", "直接退款", "批准", "同意执行",
+        "ignore", "override", "system prompt", "你是我的", "忘记", "当作",
+    ]
+    safety_secret_markers: List[str] = [
+        "system prompt", "提示词", "隐藏推理", "hidden", "reasoning", "密钥", "api key",
+    ]
+
     # ── 观测 / 追踪（OTel）──
     otel_enabled: bool = False         # true 时把 span 推到 OTLP 后端（.env 用 OTEL_ENABLED 覆盖）
 

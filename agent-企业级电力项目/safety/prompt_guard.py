@@ -9,15 +9,16 @@ import logging
 import re
 from typing import Any, Dict, List
 
+from config.settings import settings
+from config.domain import get_domain
+
 logger = logging.getLogger(__name__)
 
-# 注入/越权指令标记
-_INJECTION_MARKERS = [
-    "忽略", "忽略规则", "跳过", "跳过审批", "直接退款", "批准", "同意执行",
-    "ignore", "override", "system prompt", "你是我的", "忘记", "当作",
-]
+# 注入/越权指令标记：基础集来自 settings，叠加当前领域扩展（DomainConfig.injection_markers）
+_domain = get_domain(settings.domain)
+_INJECTION_MARKERS = list(settings.safety_injection_markers) + list(_domain.injection_markers)
 # 索要系统信息
-_SECRET_MARKERS = ["system prompt", "提示词", "隐藏推理", "hidden", "reasoning", "密钥", "api key"]
+_SECRET_MARKERS = list(settings.safety_secret_markers) + list(_domain.secret_markers)
 # 隐私(手机号/地址)
 _PHONE_RE = re.compile(r"1[3-9]\d{9}")
 _ADDR_RE = re.compile(r"(地址|收货|住址)[:：]?\S{4,30}")
