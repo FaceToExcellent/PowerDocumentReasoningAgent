@@ -10,6 +10,15 @@ from observability.audit import audit_logger
 
 logger = logging.getLogger(__name__)
 
+# 写操作词:命中视为"执行动作"(调整/删除/结算等),需人工确认;
+# 纯检索(问规程/流程/办法)不弹窗。
+_ACTION_VERBS = ["调整", "修改", "变更", "删除", "新增", "改价", "重算", "结算", "退款", "撤销", "更新"]
+
+
+def _looks_like_action(text: str) -> bool:
+    """判断用户输入是否隐含写操作(而非纯检索)。"""
+    return any(v in text for v in _ACTION_VERBS)
+
 
 # 拦截结果:是否需人工确认 + 风险等级 + 确认信息
 class InterceptResult:
@@ -25,10 +34,14 @@ class InterceptResult:
 class HarnessInterceptor:
     """所有 Skill 执行前必经的强制拦截层，无法绕过"""
 
-    # 前置拦截:按风险等级决定是否需人工确认
+    # 前置拦截:按风险等级决定是否需人工确认;纯检索不弹窗,含写操作词升级
     async def before_skill_execute(self, skill_name: str, params: dict,
                                    user_id: str = "", thread_id: str = "") -> InterceptResult:
         risk = get_risk_level(skill_name)
+        # 意图本身非高危时,仅当查询含"写操作词"才升级为人工确认(纯检索自动执行)
+        user_input = str((params or {}).get("user_input", ""))
+        if risk not in (RiskLevel.HIGH, RiskLevel.CRITICAL) and _looks_like_action(user_input):
+            risk = RiskLevel.HIGH
         if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             return InterceptResult(
                 need_confirm=True,

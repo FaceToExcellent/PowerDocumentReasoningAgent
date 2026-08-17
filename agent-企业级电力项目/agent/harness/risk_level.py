@@ -20,8 +20,8 @@ HIGH_RISK_SKILLS = {
 
 # 意图 → 风险等级（supervisor 判定意图后，执行前拦截依据）
 INTENT_RISK_MAP = {
-    "cost_audit": RiskLevel.HIGH,               # 造价核算/调整涉及资金，强制人工确认
-    "comparison_analysis": RiskLevel.LOW,       # 对比分析纯检索，自动执行
+    "cost_audit": RiskLevel.MEDIUM,         # 造价:纯检索自动;含写操作词由拦截器升级人工确认
+    "comparison_analysis": RiskLevel.LOW,   # 对比分析纯检索，自动执行
 }
 
 

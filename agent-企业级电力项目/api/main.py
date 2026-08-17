@@ -98,7 +98,7 @@ class HumanConfirmRequest(BaseModel):
     thread_id: str
     action: str = "approve"       # approve / reject / modify
     reason: str = ""
-    modified_params: dict = None
+    modified_params: Optional[dict] = None   # 显式 null 也接受(前端不修改时传 null)
     resume_token: str = ""        # 恢复凭证(防冒用)
     idempotency_key: str = ""     # 幂等键(防重复提交)
 

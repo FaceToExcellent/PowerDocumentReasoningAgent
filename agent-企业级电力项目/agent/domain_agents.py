@@ -30,20 +30,22 @@ def _route_after_execute(state: AgentState) -> str:
     return "fact_check"
 
 
-# 子图内:校验后,超时/通过/超迭代 → 结束(回父图),否则回执行重试
+# 子图内:校验后,超时/通过/超迭代 → 显式 done 终止,否则回执行重试
+# (注意:条件边直接返回 END 在 langgraph 1.2.11 子图里会抛 KeyError('__end__'),
+#  所以统一路由到显式 done 节点,再由 add_edge(done, END) 正常结束)
 def _route_after_fact_check(state: AgentState) -> str:
     if time.time() - state.get("start_time", time.time()) > settings.graph_timeout_seconds:
-        return END
+        return "done"
     if state.get("fact_check_passed"):
-        return END
+        return "done"
     if state.get("iteration_count", 0) < settings.max_iterations:
         return "execute"
-    return END
+    return "done"
 
 
-# 子图内:人工确认后,approve/modify 回执行,否则结束
+# 子图内:人工确认后,approve/modify 回执行,否则显式 done 终止
 def _route_after_hitl(state: AgentState) -> str:
-    return "execute" if state.get("human_action") in ("approve", "modify") else END
+    return "execute" if state.get("human_action") in ("approve", "modify") else "done"
 
 
 def build_domain_agent(
@@ -63,14 +65,17 @@ def build_domain_agent(
     workflow.add_node("fact_check", fact_check)
     workflow.add_node("hitl", hitl)
     workflow.add_node("external_approval", external_approval)
+    workflow.add_node("done", lambda state: {})   # 显式终止节点(规避条件边返回 END 的子图 bug)
     workflow.set_entry_point("retrieve")
     workflow.add_edge("retrieve", "execute")
     workflow.add_conditional_edges("execute", _route_after_execute,
                                    {"fact_check": "fact_check", "hitl": "hitl",
                                     "external_approval": "external_approval"})
     workflow.add_conditional_edges("fact_check", _route_after_fact_check,
-                                   {"execute": "execute"})
-    workflow.add_conditional_edges("hitl", _route_after_hitl, {"execute": "execute"})
+                                   {"execute": "execute", "done": "done"})
+    workflow.add_conditional_edges("hitl", _route_after_hitl,
+                                   {"execute": "execute", "done": "done"})
     workflow.add_conditional_edges("external_approval", _route_after_hitl,
-                                   {"execute": "execute"})
+                                   {"execute": "execute", "done": "done"})
+    workflow.add_edge("done", END)
     return workflow.compile(name=f"agent_{intent}")

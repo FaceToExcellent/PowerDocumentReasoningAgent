@@ -790,14 +790,16 @@ def route_after_agent(state: AgentState) -> str:
 # ── 并行 fan-out / 汇总──────────────────
 def fan_out_parallel(state: AgentState) -> list:
     """supervisor 判定 parallel 时,把每个意图作为独立子任务分发到对应领域 agent(子图);
-    单意图/chat 直接路由到对应领域 agent。"""
+    单意图/chat 直接路由到对应领域 agent。
+    注:子图经 Send 分支只收到 Send 携带的状态(不继承父级普通通道),
+    所以并行分支必须带上完整父状态 + 覆盖 intent(身份通道已有 reducer 不冲突)。"""
     from langgraph.types import Send
     plan = state.get("routing_plan") or {}
     intents = plan.get("intents", [])
     if not intents or len(intents) == 1:
         intent = intents[0] if intents else "chat"
         return f"agent_{intent}"
-    return [Send(f"agent_{intent}", {"intent": intent}) for intent in intents[:2]]
+    return [Send(f"agent_{intent}", {**state, "intent": intent}) for intent in intents[:2]]
 
 
 # 领域 agent 完成后路由:parallel 多意图 → aggregate 汇总,否则直接收尾

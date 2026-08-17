@@ -51,6 +51,7 @@ echo "DEEPSEEK_API_KEY=sk-xxx" >> .env
 KMP_DUPLICATE_LIB_OK=TRUE .venv/bin/python scripts/seed_docs.py
 # 启动
 KMP_DUPLICATE_LIB_OK=TRUE .venv/bin/python main.py --port 8090
+OTEL_ENABLED=true uv run python main.py --port 8090
 ```
 
 ### 2. 前端
