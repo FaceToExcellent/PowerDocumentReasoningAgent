@@ -122,7 +122,10 @@ class SkillHooks:
     # ── on_error:异常归一成降级信号(带 error_category 分类) ──
     def on_error(self, skill_name: str, error: Exception) -> HookEvent:
         from agent.degradation import classify_error
-        category = classify_error(error)
+        from observability.tracing import tracer
+        # 错误降级 span:记录归一化后的 error_category(错误降级可视化)
+        with tracer.span("degradation", skill=skill_name, error=str(error)[:120]):
+            category = classify_error(error)
         event = HookEvent(
             hook_type="on_error", target_name=skill_name, result="degraded",
             reason="Skill 执行异常,归一成可读降级信号,不让链路静默失败",

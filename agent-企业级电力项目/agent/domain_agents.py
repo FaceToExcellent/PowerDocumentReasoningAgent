@@ -59,9 +59,10 @@ def build_domain_agent(
     retry_policy: RetryPolicy,
 ) -> Any:
     """构建一个领域 Agent 的独立编译子图(共享 AgentState)。"""
+    from observability.tracing import span_node
     workflow = StateGraph(AgentState)
     workflow.add_node("retrieve", retrieve)
-    workflow.add_node("execute", execute, retry_policy=retry_policy)
+    workflow.add_node("execute", span_node("execute", execute), retry_policy=retry_policy)
     workflow.add_node("fact_check", fact_check)
     workflow.add_node("hitl", hitl)
     workflow.add_node("external_approval", external_approval)

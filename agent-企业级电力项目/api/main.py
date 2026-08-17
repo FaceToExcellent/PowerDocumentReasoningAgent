@@ -269,14 +269,19 @@ async def _run_graph_stream(thread_id, req, tenant, user_id, token_queue, abort_
         logger.warning(f"[HITL] 检测 interrupt 失败: {e}")
 
     # 最终 done 事件
-    yield ServerSentEvent(event="done", data=json.dumps({
-        "reply": final_state.get("agent_output", ""),
-        "intent": final_state.get("intent", ""),
-        "fact_check_passed": final_state.get("fact_check_passed", True),
-        "duration_ms": int((time.time() - state.get("start_time", time.time())) * 1000),
-        "citations": final_state.get("citations", []),
-        "cost_summary": final_state.get("cost_summary"),
-    }, ensure_ascii=False))
+    from observability.tracing import tracer
+    with tracer.span("final_state", intent=final_state.get("intent", ""),
+                     fact_check=final_state.get("fact_check_passed", True),
+                     citations=len(final_state.get("citations") or []),
+                     agent_output_len=len(final_state.get("agent_output", "") or "")):
+        yield ServerSentEvent(event="done", data=json.dumps({
+            "reply": final_state.get("agent_output", ""),
+            "intent": final_state.get("intent", ""),
+            "fact_check_passed": final_state.get("fact_check_passed", True),
+            "duration_ms": int((time.time() - state.get("start_time", time.time())) * 1000),
+            "citations": final_state.get("citations", []),
+            "cost_summary": final_state.get("cost_summary"),
+        }, ensure_ascii=False))
 
 
 # ── 取消 ──────────────────────────────────────────

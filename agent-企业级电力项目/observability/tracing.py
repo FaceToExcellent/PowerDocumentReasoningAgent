@@ -52,6 +52,15 @@ class Tracer:
 tracer = Tracer()
 
 
+# 包装工作流节点:给节点执行加一层 span(工作流节点可视化)
+def span_node(name: str, fn):
+    """包装 LangGraph 节点函数,给节点执行加一层 node_{name} span。"""
+    async def wrapped(state):
+        with tracer.span(f"node_{name}", node=name):
+            return await fn(state)
+    return wrapped
+
+
 # 获取当前 span 的 trace_id（无 OTel 时读 contextvar）
 def get_trace_id() -> str:
     if not HAS_OTEL:

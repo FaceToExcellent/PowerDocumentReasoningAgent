@@ -135,7 +135,8 @@ async def supervisor_node(state: AgentState) -> dict:
 
     # ⭐ Prompt 注入防护:扫描用户输入,识别越权/索要系统信息
     from safety.prompt_guard import scan_external_text, ExternalText
-    safety_scan = scan_external_text(ExternalText("user", user_input))
+    with tracer.span("security_scan", source="user"):
+        safety_scan = scan_external_text(ExternalText("user", user_input))
     state["security_events"] = list(state.get("security_events") or [])
     if safety_scan.categories:
         state["security_events"].append(
@@ -155,6 +156,10 @@ async def supervisor_node(state: AgentState) -> dict:
     # 1. 复杂度预判（零 LLM 开销）
     plan = _judge_complexity(state)
     state["routing_plan"] = plan
+    # 任务路由可视化:记录分级判定(mode + 候选意图)
+    with tracer.span("task_route", mode=plan.get("mode", ""),
+                     intents=plan.get("intents", []), user_input=user_input[:60]):
+        pass
 
     # 2. 闲聊检测：短输入 + 无电力关键词
     is_short = len(user_input.strip()) <= 10
@@ -345,8 +350,11 @@ async def agent_execute_node(state: AgentState) -> dict:
         cb.add("system_rules",
                f"人工确认后修改的执行参数：{json.dumps(approved_params, ensure_ascii=False)}，请按修改后的参数执行。",
                key="approved_params", priority=2)
-    cb.resolve_conflicts()
-    
+    # 上下文构建 span:记录条目数/高信任保护数(上下文组装可视化)
+    with tracer.span("context_build", items=len(cb._items),
+                     protected=sum(1 for it in cb._items if it.trust >= 70)):
+        cb.resolve_conflicts()
+
     # ⭐ 上下文压缩:保护高信任项,折叠低相关历史
     comp_report = cb.compress(max_items=getattr(settings, "max_recent_rounds", 8))
     state["context_compression"] = comp_report
@@ -430,9 +438,16 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     ctx = {"query": user_input, "tenant_id": tenant, "user_context": {"tenant_id": tenant}}
     if state.get("approved_params"):
         ctx["approved_params"] = state.get("approved_params")
-    result = await skill.run(ctx)
+    # 工具调用 span:参数摘要 + Observation 摘要(脱敏)进 trace
+    from opentelemetry import trace as _otel_trace
+    with tracer.span("tool_call", tool="comparison_analysis",
+                     params=json.dumps({"query": user_input}, ensure_ascii=False)[:200]):
+        result = await skill.run(ctx)
+        obs = result.to_observation()
+        _otel_trace.get_current_span().set_attribute("observation", obs.text[:200])
+        _otel_trace.get_current_span().set_attribute("success", result.success)
+        _otel_trace.get_current_span().set_attribute("duration_ms", result.duration_ms)
     # L20:ToolResult → Observation(脱敏摘要 + 省略字段),回填进 tool_calls 记录
-    obs = result.to_observation()
     state["tool_calls"][-1].update({
         "observation": obs.text[:300],
         "omitted_fields": obs.omitted_fields,
@@ -597,22 +612,27 @@ async def execution_log_node(state: AgentState) -> dict:
     intent = state.get("intent", "")
 
     # ⭐ 构建请求级 cost_summary(证据治理层:模型/路径/token 估算/来源数)
-    primary_backend = model_router.route(intent if intent != "chat" else "chat")
-    est_prompt = int(len(state.get("user_input", "")) / 2 + len(output) / 2) # 估算 prompt token 数(每个字符 2 个 token)
-    est_total = int(len(output) / 2) # 估算 token 数(每个字符 2 个 token)
-    cost_summary = {
-        "path": "rag" if state.get("rag_results") else ("cache" if state.get("cache_hit") else "direct"),
-        "model_backend": primary_backend,
-        "intent": intent,
-        "rag_hits": len(state.get("rag_results") or []),
-        "citations_count": len(state.get("citations") or []),
-        "estimated_prompt_tokens": est_prompt,
-        "estimated_completion_tokens": est_total,
-        "estimated_total_tokens": est_prompt + est_total,
-        "cache_hit": state.get("cache_hit", False),
-        "fact_check_passed": state.get("fact_check_passed", True),
-        "confidence": state.get("confidence", 0),
-    }
+    from opentelemetry import trace as _otel_trace
+    with tracer.span("cost_summary", intent=intent):
+        primary_backend = model_router.route(intent if intent != "chat" else "chat")
+        est_prompt = int(len(state.get("user_input", "")) / 2 + len(output) / 2)  # 估算 prompt token 数
+        est_total = int(len(output) / 2)  # 估算 token 数
+        cost_summary = {
+            "path": "rag" if state.get("rag_results") else ("cache" if state.get("cache_hit") else "direct"),
+            "model_backend": primary_backend,
+            "intent": intent,
+            "rag_hits": len(state.get("rag_results") or []),
+            "citations_count": len(state.get("citations") or []),
+            "estimated_prompt_tokens": est_prompt,
+            "estimated_completion_tokens": est_total,
+            "estimated_total_tokens": est_prompt + est_total,
+            "cache_hit": state.get("cache_hit", False),
+            "fact_check_passed": state.get("fact_check_passed", True),
+            "confidence": state.get("confidence", 0),
+        }
+        _otel_trace.get_current_span().set_attribute("path", cost_summary["path"])
+        _otel_trace.get_current_span().set_attribute("model_backend", primary_backend)
+        _otel_trace.get_current_span().set_attribute("est_total_tokens", est_prompt + est_total)
 
     write_log(
         thread_id=state.get("thread_id", ""), account=state.get("account", "anonymous"),
@@ -660,7 +680,9 @@ async def hitl_review_node(state: AgentState) -> dict:
         "idempotency_key": idem_key,
     }
     # ⭐ resume_token 落盘:仅此 thread 可用此凭证恢复(防冒用)
-    await cache_service.set(f"hitl:resume:{thread_id}", resume_token, ttl=settings.hitl_resume_ttl)
+    with tracer.span("hitl_pause", thread_id=thread_id, intent=state.get("intent", ""),
+                     risk_level=review_data["risk_level"]):
+        await cache_service.set(f"hitl:resume:{thread_id}", resume_token, ttl=settings.hitl_resume_ttl)
     decision = interrupt(review_data)
     action = decision.get("action", "") if isinstance(decision, dict) else str(decision or "")
     audit_logger.log_human(
@@ -842,13 +864,15 @@ async def aggregate_node(state: AgentState) -> dict:
 # ── 构建 & 编译图(P2:父图编排 + 领域 Agent 子图)──
 def build_graph():
     from agent.domain_agents import build_domain_agent
+    from observability.tracing import span_node
 
     workflow = StateGraph(AgentState)
-    workflow.add_node("cache_check", cache_check_node)
-    workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("aggregate", aggregate_node)
-    workflow.add_node("memory_write", memory_write_node)
-    workflow.add_node("execution_log", execution_log_node)
+    # 父图节点统一包一层 span,工作流节点可视化
+    workflow.add_node("cache_check", span_node("cache_check", cache_check_node))
+    workflow.add_node("supervisor", span_node("supervisor", supervisor_node))
+    workflow.add_node("aggregate", span_node("aggregate", aggregate_node))
+    workflow.add_node("memory_write", span_node("memory_write", memory_write_node))
+    workflow.add_node("execution_log", span_node("execution_log", execution_log_node))
 
     # 领域 Agent:每个意图一个独立子图(共享 AgentState,独立重试/校验/复核)
     agent_names = []
