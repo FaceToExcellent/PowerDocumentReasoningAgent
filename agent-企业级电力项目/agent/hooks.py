@@ -76,19 +76,26 @@ class SkillHooks:
         return event
 
     # ── post_tool_call:结果脱敏 + 摘要 + omitted_fields 字段裁剪 ──
-    def post_tool_call(self, skill_name: str, result: Dict[str, Any]) -> HookEvent:
-        output = str(result.get("result") or result.get("output") or "")
-        safe_output = self.redact(output)
-        redacted = safe_output != output
-        # ⭐ Observation 治理:记录省略的内部字段,只留摘要进模型
-        omitted_fields = self._collect_omitted(result)
+    def post_tool_call(self, skill_name: str, result) -> HookEvent:
+        from agent.tool_result import ToolResult
+        if isinstance(result, ToolResult):
+            # ToolResult → Observation(已脱敏摘要 + 省略字段),L20
+            obs = result.to_observation()
+            output, omitted_fields, redacted = obs.text, list(obs.omitted_fields), obs.redacted
+        else:
+            output = str(result.get("result") or result.get("output") or "")
+            safe_output = self.redact(output)
+            redacted = safe_output != output
+            output = safe_output
+            # ⭐ Observation 治理:记录省略的内部字段,只留摘要进模型
+            omitted_fields = self._collect_omitted(result)
         event = HookEvent(
             hook_type="post_tool_call", target_name=skill_name,
             result="sanitized" if (redacted or omitted_fields) else "passed",
             reason="Skill 结果脱敏 + 字段裁剪后进入上下文,不暴露隐私/密钥/内部字段",
             safe_summary={
                 "skill": skill_name,
-                "output_preview": safe_output[:120],
+                "output_preview": output[:120],
                 "omitted_fields": omitted_fields,
                 "redacted": redacted,
             },

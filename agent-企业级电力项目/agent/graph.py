@@ -431,12 +431,24 @@ async def _run_comparison_skill(state, user_input, fallback_output, tenant):
     if state.get("approved_params"):
         ctx["approved_params"] = state.get("approved_params")
     result = await skill.run(ctx)
+    # L20:ToolResult → Observation(脱敏摘要 + 省略字段),回填进 tool_calls 记录
+    obs = result.to_observation()
+    state["tool_calls"][-1].update({
+        "observation": obs.text[:300],
+        "omitted_fields": obs.omitted_fields,
+        "success": result.success,
+        "duration_ms": result.duration_ms,
+    })
     hooks.post_tool_call("comparison_analysis", result)
-    if not result.get("success"):
-        hooks.on_error("comparison_analysis", Exception(result.get("error", "skill failed")))
+    if not result.success:
+        hooks.on_error("comparison_analysis", Exception(result.error or "skill failed"))
     state["hook_events"] = [e.to_dict() for e in hooks.events] + [hooks.on_completion()]
-    if result.get("success"):
-        return result.get("result", {}).get("analysis", fallback_output)
+    if result.success:
+        if isinstance(result.result, dict):
+            return result.result.get("analysis", fallback_output)
+        if isinstance(result.result, str):
+            return result.result or fallback_output
+        return fallback_output
     return fallback_output
 
 

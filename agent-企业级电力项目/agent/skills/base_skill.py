@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from agent.harness.risk_level import RiskLevel
+from agent.tool_result import ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +54,22 @@ class BaseSkill(ABC):
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         ...
 
-    # 运行 Skill 入口:执行 execute 并附加计时与异常保护
-    async def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """运行 Skill，带计时和异常保护"""
+    # 运行 Skill 入口:执行 execute 并附加计时与异常保护,返回 ToolResult
+    async def run(self, context: Dict[str, Any]) -> ToolResult:
+        """运行 Skill，返回 ToolResult(带计时与异常保护)。"""
         start = time.time()
+        name = getattr(self.metadata, "name", self.__class__.__name__)
         try:
             result = await self.execute(context)
             duration_ms = int((time.time() - start) * 1000)
-            result.setdefault("success", True)
-            result.setdefault("duration_ms", duration_ms)
-            return result
+            if isinstance(result, ToolResult):
+                result.duration_ms = duration_ms
+                return result
+            if isinstance(result, dict):
+                if result.get("success", True):
+                    return ToolResult.ok(name, result.get("result") or result, duration_ms)
+                return ToolResult.fail(name, result.get("error", "skill failed"), duration_ms)
+            return ToolResult.ok(name, result, duration_ms)
         except Exception as e:
-            logger.error(f"Skill [{self.metadata.name}] 执行失败: {e}", exc_info=True)
-            return {
-                "success": False, "error": str(e), "confidence": 0.0,
-                "duration_ms": int((time.time() - start) * 1000),
-            }
+            logger.error(f"Skill [{name}] 执行失败: {e}", exc_info=True)
+            return ToolResult.fail(name, str(e), int((time.time() - start) * 1000))
