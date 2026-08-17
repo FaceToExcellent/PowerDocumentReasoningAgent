@@ -97,3 +97,47 @@ def _merge_path(old: List[str], heading: str) -> List[str]:
     if old and len(old) >= 1:
         return [old[0]] if heading.startswith("第") and "章" in heading[:3] else old[:-1] + [heading]
     return [heading]
+
+
+# ── LlamaIndex 语义切片(替换自研标题切片,接口兼容)──
+def split_document_hierarchical(content: str, source: str = "", title: str = "",
+                                parent_size: int = 1024, child_size: int = None) -> List[Dict[str, Any]]:
+    """LlamaIndex HierarchicalNodeParser 语义切片:句子感知 + 父子分层。
+
+    产出叶子(小 chunk)作为检索单元,带 parent_id 指向父 chunk(大上下文,供后续检索扩上下文)。
+    输出形状与 split_document 兼容,可直接喂 rag_service.add_documents。
+    """
+    from llama_index.core import Document
+    from llama_index.core.node_parser import HierarchicalNodeParser, get_leaf_nodes
+    from llama_index.core.schema import NodeRelationship
+    child_size = child_size or settings.default_doc_chunk_size or 512
+    parser = HierarchicalNodeParser.from_defaults(chunk_sizes=[parent_size, child_size])
+    nodes = parser.get_nodes_from_documents([Document(text=content)])
+    leaves = get_leaf_nodes(nodes)
+
+    docs = []
+    for i, node in enumerate(leaves):
+        text = (node.text or "").strip()
+        if not text:
+            continue
+        parent_id = ""
+        try:
+            rels = getattr(node, "relationships", {}) or {}
+            parent = rels.get(NodeRelationship.PARENT)
+            parent_id = getattr(parent, "node_id", "") or ""
+        except Exception:
+            pass
+        meta = {
+            "chunk_id": _make_chunk_id(source, i, text),
+            "source": source,
+            "title": title,
+            "section_path": [],
+            "chunk_index": i,
+            "prev_id": _make_chunk_id(source, i - 1, "") if i > 0 else "",
+            "next_id": _make_chunk_id(source, i + 1, "") if i < len(leaves) - 1 else "",
+            "parent_id": parent_id,
+            "type": "text",
+            "is_table": False,
+        }
+        docs.append({"content": text, "metadata": meta})
+    return docs if docs else split_document(content, source, title)   # 兜底走标题切片

@@ -66,6 +66,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="电力智能运维 Agent（企业版）", version="5.0.0", lifespan=lifespan)
 
+# 互操作:挂载 A2A 路由(Agent Card + JSON-RPC 委托端点)
+from interop.power_a2a import router as a2a_router
+app.include_router(a2a_router)
+
 # CORS（放在网关中间件最外层，先处理 OPTIONS）
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
@@ -375,16 +379,24 @@ async def chat_recover(req: HumanConfirmRequest):
 
 
 # ── 文档上传（异步，MQ 消费）──────────────────────
-# 文档上传接口:切分入库并返回处理结果
+# 文档上传接口:按格式解析切片入库并返回处理结果
 @app.post("/docs/upload")
 async def upload_doc(file: UploadFile = File(...), tenant_id: str = Header("default")):
-    """上传文档：保存文件 → 发 MQ 消息 → 立即返回处理中"""
+    """上传文档：按格式解析切片入库(PDF/Word/Excel/图片/TXT)"""
     content = await file.read()
-    text = content.decode("utf-8", errors="ignore")
     file_name = file.filename or "doc.txt"
 
-    from rag.doc_splitter import split_document
-    docs = split_document(text, source=file_name, title=file_name.split(".")[0])
+    # 结构化解析:unstructured 按格式分流,表格/标题/图保真;失败回退文本切片
+    try:
+        from rag.document_parser import parse_document
+        docs = parse_document(content, file_name,
+                              source=file_name, title=file_name.split(".")[0])
+    except Exception as e:
+        logger.warning(f"结构化解析失败，回退文本切片: {file_name} err={str(e)[:120]}")
+        text = content.decode("utf-8", errors="ignore")
+        from rag.doc_splitter import split_document_hierarchical
+        docs = split_document_hierarchical(text, source=file_name, title=file_name.split(".")[0])
+
     from rag.retriever import rag_service
     n = rag_service.add_documents(docs, tenant_id=tenant_id)
     logger.info(f"文档 {file_name} 入库 {n} 条 (tenant={tenant_id})")

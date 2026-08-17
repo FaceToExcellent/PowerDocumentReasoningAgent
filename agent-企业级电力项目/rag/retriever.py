@@ -43,20 +43,16 @@ def _rrf_merge(vector_hits: List[Dict], keyword_hits: List[Dict], top_k: int) ->
     return ranked[:top_k]
 
 
-# 从查询抽取关键词(电力业务词+ASCII词)，用于BM25直觉召回
-def _keyword_terms(query: str) -> List[str]:
-    """从查询抽关键词(中文按业务词,ASCII 按 token)。"""
-    import re
-    terms = []
-    # 电力业务词(来自知识文档高频词)
-    for w in ["主变", "变压器", "母线", "断路器", "检修", "保护", "规程", "电压", "线路",
-              "电缆", "造价", "定额", "故障", "跳闸", "巡视", "运维", "安规", "DL/T", "GB",
-              "110", "220", "kV", "KVA"]:
-        if w in query:
-            terms.append(w)
-    # ASCII 词
-    terms += re.findall(r"[a-zA-Z0-9]{2,}", query)
-    return list(dict.fromkeys(terms))
+# 中文分词(jieba,BM25 全文索引/查询用)
+def _tokenize(text: str) -> List[str]:
+    """jieba 中文分词 + 小写,过滤单字/空白,产出 BM25 词项。"""
+    import jieba
+    tokens = []
+    for seg in jieba.cut(str(text or "")):
+        seg = seg.strip().lower()
+        if len(seg) >= 2 and not seg.isspace():
+            tokens.append(seg)
+    return tokens
 
 
 # 统一RAG检索服务：向量+关键词召回、RRF融合、Rerank，兼容Milvus/Chroma
@@ -72,6 +68,8 @@ class RAGService:
         else:
             self.store = ChromaVectorStore(persist_dir=settings.chroma_persist_dir)
         self._corpus_cache: Optional[Dict[str, List[Dict]]] = None  # tenant_id -> docs(关键词召回用)
+        self._bm25_index: Dict[str, Any] = {}       # tenant_id -> BM25Okapi
+        self._bm25_docs: Dict[str, List[Dict]] = {} # tenant_id -> docs(与索引对齐)
         logger.info(f"向量库模式: {settings.vector_store_type}")
 
     # 加载租户文档语料(关键词召回用)，带缓存避免重复查询
@@ -80,7 +78,7 @@ class RAGService:
         if self._corpus_cache is None or tenant_id not in self._corpus_cache:
             try:
                 self._corpus_cache = self._corpus_cache or {}
-                self._corpus_cache[tenant_id] = self.store.query(tenant_id=tenant_id, limit=1000)
+                self._corpus_cache[tenant_id] = self.store.query(tenant_id=tenant_id, limit=1000, include_content=True)
             except Exception as e:
                 logger.warning(f"关键词语料加载失败: {e}")
                 self._corpus_cache[tenant_id] = []
@@ -89,43 +87,78 @@ class RAGService:
     # ── 检索（兼容原 RAGService.search 接口 + tenant_id）──
     def search(self, query: str, top_k: int = 5, filters: Optional[Dict] = None,
                intent: str = "", tenant_id: str = "") -> Dict[str, Any]:
-        # ① 向量召回(dense)
-        dense = self.store.search(query, top_k=top_k * 2, filters=filters, tenant_id=tenant_id)
-        for hit in dense:
-            hit["vector_score"] = hit.get("score", 0)
+        from observability.tracing import tracer
+        with tracer.span("rag_search", query=query[:100], intent=intent,
+                         top_k=top_k, tenant_id=tenant_id):
+            # ① 向量召回(dense)
+            with tracer.span("rag_vector_search", tenant_id=tenant_id):
+                dense = self.store.search(query, top_k=top_k * 2, filters=filters,
+                                          tenant_id=tenant_id)
+                for hit in dense:
+                    hit["vector_score"] = hit.get("score", 0)
 
-        # ② 关键词召回(BM25 直觉:关键词命中文本)
-        keyword = self._keyword_retrieve(query, tenant_id, top_k=top_k * 2)
+            # ② 关键词召回(BM25 全文:jieba 分词 + rank_bm25)
+            keyword = self._bm25_retrieve(query, tenant_id, top_k=top_k * 2)
 
-        # ③ RRF 融合 + Rerank
-        hybrid = _rrf_merge(dense, keyword, top_k * 2)
-        results = self._hybrid_and_rerank(query, hybrid, top_k)
+            # ③ RRF 融合 + Rerank
+            with tracer.span("rag_rrf_merge", vector=len(dense), keyword=len(keyword)):
+                hybrid = _rrf_merge(dense, keyword, top_k * 2)
+            results = self._hybrid_and_rerank(query, hybrid, top_k)
         return {"results": results, "total_found": len(results), "query": query,
                 "sources_dist": self._source_distribution(dense, keyword)}
 
-    # BM25直觉：关键词匹配文档title/source做稀疏召回，稀疏词加权
-    def _keyword_retrieve(self, query: str, tenant_id: str, top_k: int) -> List[Dict]:
-        """BM25 直觉:关键词匹配文档 title/source(向量库标量字段)。稀疏词加权。"""
-        terms = _keyword_terms(query)
+    # BM25 全文召回:jieba 分词 + rank_bm25 打分(基于文档 content)
+    def _bm25_retrieve(self, query: str, tenant_id: str, top_k: int) -> List[Dict]:
+        """真 BM25:对全文 content 建索引打分(rank_bm25),替代旧 title/source 关键词匹配。"""
+        terms = _tokenize(query)
         if not terms:
             return []
+        index, docs = self._bm25(tenant_id)
+        if index is None or not docs:
+            return []
+        try:
+            from observability.tracing import tracer
+            with tracer.span("rag_bm25", terms=terms[:10], docs=len(docs)):
+                scores = index.get_scores(terms)
+        except Exception as e:
+            logger.warning(f"BM25 打分失败: {e}")
+            return []
+        # 小语料兜底:BM25Okapi 的 idf 在 df≈N/2 时归零(如 2 篇文档各命中 1 篇),
+        # 整体归零时退化为词频命中,保证关键词召回不空手
+        if not any(s > 0 for s in scores):
+            scores = [float(sum(1 for t in terms if t in _tokenize(d.get("content", ""))))
+                      for d in docs]
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return self._hits_from(docs, ranked, scores)
+
+    # 按打分排名组装 keyword 命中(hit 结构供 RRF 融合消费)
+    def _hits_from(self, docs: List[Dict], indices: List[int], scores: List[float]) -> List[Dict]:
         hits = []
-        for doc in self._get_corpus(tenant_id):
-            title = str(doc.get("title", ""))
-            source = str(doc.get("source", ""))
-            searchable = f"{title} {source}"
-            matched = [t for t in terms if t.lower() in searchable.lower()]
-            if not matched:
+        for i in indices:
+            if scores[i] <= 0:
                 continue
-            score = sum(2.0 if len(t) >= 4 else 1.0 for t in set(matched))
+            doc = docs[i]
             hits.append({
-                "doc": {"content": title, "metadata": {"title": title, "source": source,
-                                                       "chunk_id": str(doc.get("id", ""))}},
-                "score": round(score, 3), "keyword_score": round(score, 3),
+                "doc": {"content": str(doc.get("content", "")),
+                        "metadata": {"title": str(doc.get("title", "")),
+                                     "source": str(doc.get("source", "")),
+                                     "chunk_id": str(doc.get("id", ""))}},
+                "score": round(float(scores[i]), 4),
+                "keyword_score": round(float(scores[i]), 4),
                 "chunk_id": str(doc.get("id", "")),
             })
-        hits.sort(key=lambda h: h["keyword_score"], reverse=True)
-        return hits[:top_k]
+        return hits
+
+    # 构建/复用 BM25 索引(按租户,惰性;语料变化由 add_documents 失效)
+    def _bm25(self, tenant_id: str):
+        """按租户惰性构建 BM25Okapi 索引并缓存。"""
+        if tenant_id not in self._bm25_index:
+            corpus = self._get_corpus(tenant_id)
+            tokenized = [_tokenize(d.get("content", "")) for d in corpus]
+            from rank_bm25 import BM25Okapi
+            self._bm25_index[tenant_id] = BM25Okapi(tokenized) if any(tokenized) else None
+            self._bm25_docs[tenant_id] = corpus
+        return self._bm25_index.get(tenant_id), self._bm25_docs.get(tenant_id, [])
 
     # 统计两路召回的命中数分布
     def _source_distribution(self, dense: List[Dict], keyword: List[Dict]) -> Dict[str, int]:
@@ -137,10 +170,17 @@ class RAGService:
         if not hybrid_results:
             return []
         from rag.reranker import reranker
-        return reranker.rerank(query, hybrid_results, top_k)
+        from observability.tracing import tracer
+        with tracer.span("rag_rerank", candidates=len(hybrid_results)):
+            return reranker.rerank(query, hybrid_results, top_k)
 
     # ── 入库 ──
     def add_documents(self, docs: List[Dict[str, Any]], tenant_id: str = "") -> int:
+        # 语料变化 → 失效 BM25 索引与语料缓存,下次查询重建
+        self._bm25_index.pop(tenant_id, None)
+        self._bm25_docs.pop(tenant_id, None)
+        if self._corpus_cache is not None:
+            self._corpus_cache.pop(tenant_id, None)
         return self.store.add_documents(docs, tenant_id=tenant_id)
 
     # 按租户删除全部文档

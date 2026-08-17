@@ -66,6 +66,7 @@ class Settings(BaseSettings):
 
     # ── 观测 / 追踪（OTel）──
     otel_enabled: bool = False         # true 时把 span 推到 OTLP 后端（.env 用 OTEL_ENABLED 覆盖）
+    otel_mode: str = "otlp"            # otlp(推到 Jaeger/Tempo) / console(打印到 stdout,调试用)
 
     # ── HITL / 外部审批 ──
     hitl_resume_ttl: int = 1800             # resume_token 有效期(秒)
@@ -74,6 +75,10 @@ class Settings(BaseSettings):
     approval_external_endpoint: str = ""    # 外部审批系统提交地址
     approval_callback_secret: str = ""      # 审批回调 HMAC 共享密钥
     approval_redis_ttl: int = 86400         # 审批单状态有效期(秒)
+
+    # ── 文档图注(视觉模型,预留接口,默认不启用)──
+    vision_model_enabled: bool = False      # true 时对 PDF 图片调用本地视觉模型生成图注
+    vision_model_name: str = ""             # 如 qwen2.5-vl / llava(未配置则占位)
 
     # ── 电力业务 ──
     power_voltage_levels: List[str] = ["10", "35", "110", "220", "500", "750"]

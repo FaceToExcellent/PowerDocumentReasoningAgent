@@ -54,6 +54,16 @@ class AuditLogger:
                     created_at TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_agent (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id TEXT, tenant_id TEXT, thread_id TEXT,
+                    agent TEXT, user_input TEXT, agent_output TEXT,
+                    fact_check_passed INTEGER, confidence_level TEXT,
+                    tool_calls INTEGER, citations_count INTEGER, iteration INTEGER,
+                    created_at TEXT
+                )
+            """)
 
     # 通用插入：向指定审计表写入一条记录
     def _insert(self, table: str, data: dict):
@@ -112,6 +122,22 @@ class AuditLogger:
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         _audit_logger.error(json.dumps({"event": "security", **rec}, ensure_ascii=False))
+
+    # ── Agent 级审计(项目内多 agent:记录每个子图 agent 的一次执行)──
+    def log_agent(self, *, tenant_id="", thread_id="", agent="", user_input="",
+                  agent_output="", fact_check_passed=True, confidence_level="high",
+                  tool_calls=0, citations_count=0, iteration=0):
+        rec = {
+            "trace_id": get_trace_id(), "tenant_id": tenant_id, "thread_id": thread_id,
+            "agent": agent, "user_input": user_input[:2000],
+            "agent_output": (agent_output or "")[:4000],
+            "fact_check_passed": int(fact_check_passed), "confidence_level": confidence_level,
+            "tool_calls": int(tool_calls), "citations_count": int(citations_count),
+            "iteration": int(iteration),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _audit_logger.info(json.dumps({"event": "agent", **rec}, ensure_ascii=False))
+        self._insert("audit_agent", rec)
 
     # 查询审计表，返回最近 limit 条记录
     def query(self, table: str, limit: int = 20) -> list:

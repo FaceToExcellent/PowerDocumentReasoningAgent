@@ -197,15 +197,17 @@ class MilvusVectorStore:
         except Exception:
             return 0
 
-    # 按租户查询原始数据(管理/调试用)
-    def query(self, tenant_id: str = "", limit: int = 20) -> list:
-        """按租户查原始数据（管理/调试用）"""
+    # 按租户查询原始数据(管理/调试用)；include_content=True 时带 content 供 BM25 建索引
+    def query(self, tenant_id: str = "", limit: int = 20, include_content: bool = False) -> list:
+        """按租户查原始数据（管理/调试用）；include_content=True 时带 content 供 BM25 建索引"""
         try:
+            fields = ["id", "tenant_id", "title", "source"]
+            if include_content:
+                fields.append("content")
             if tenant_id:
                 return self.client.query(self.COLLECTION, filter=f'tenant_id == "{tenant_id}"',
-                                         output_fields=["id", "tenant_id", "title", "source"],
-                                         limit=limit)
-            return self.client.query(self.COLLECTION, output_fields=["id", "tenant_id", "title", "source"], limit=limit)
+                                         output_fields=fields, limit=limit)
+            return self.client.query(self.COLLECTION, output_fields=fields, limit=limit)
         except Exception as e:
             logger.error(f"查询失败: {e}")
             return []

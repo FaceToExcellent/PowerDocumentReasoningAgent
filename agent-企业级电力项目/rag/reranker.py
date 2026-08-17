@@ -35,6 +35,7 @@ class Reranker:
 
     # 对初召回候选精排，返回TopK带rerank_score的结果
     def rerank(self, query: str, results: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        from observability.tracing import tracer
         if not results:
             return []
 
@@ -42,34 +43,36 @@ class Reranker:
         model = self._load_model()
         if model:
             try:
-                pairs = [(query, str(r.get("doc", {}).get("content", ""))[:512]) for r in results]
-                scores = model.predict(pairs)
-                for r, s in zip(results, scores):
-                    r["rerank_score"] = round(float(s), 4)
-                    r["rerank_reasons"] = ["cross-encoder 精排"]
-                ranked = sorted(results, key=lambda r: r.get("rerank_score", 0), reverse=True)
-                return ranked[:top_k]
+                with tracer.span("rag_rerank_model", candidates=len(results)):
+                    pairs = [(query, str(r.get("doc", {}).get("content", ""))[:512]) for r in results]
+                    scores = model.predict(pairs)
+                    for r, s in zip(results, scores):
+                        r["rerank_score"] = round(float(s), 4)
+                        r["rerank_reasons"] = ["cross-encoder 精排"]
+                    ranked = sorted(results, key=lambda r: r.get("rerank_score", 0), reverse=True)
+                    return ranked[:top_k]
             except Exception as e:
                 logger.warning(f"cross-encoder 精排失败,回退本地: {e}")
 
         # ── ② 本地规则兜底:关键词/来源加分 ──
-        for r in results:
-            meta = r.get("doc", {}).get("metadata", {}) or {}
-            title = str(meta.get("title", ""))
-            source = str(meta.get("source", ""))
-            r["rerank_reasons"] = []
-            base = r.get("score", 0)
-            if query:
-                for kw in query[:6]:
-                    if kw and kw in title:
-                        base += 0.1
-                        r["rerank_reasons"].append("标题关键词命中")
-            if query and any(kw in source for kw in query[:4]):
-                base += 0.05
-                r["rerank_reasons"].append("来源关键词命中")
-            r["rerank_score"] = round(base, 4)
-        ranked = sorted(results, key=lambda r: r.get("rerank_score", 0), reverse=True)
-        return ranked[:top_k]
+        with tracer.span("rag_rerank_rule", candidates=len(results)):
+            for r in results:
+                meta = r.get("doc", {}).get("metadata", {}) or {}
+                title = str(meta.get("title", ""))
+                source = str(meta.get("source", ""))
+                r["rerank_reasons"] = []
+                base = r.get("score", 0)
+                if query:
+                    for kw in query[:6]:
+                        if kw and kw in title:
+                            base += 0.1
+                            r["rerank_reasons"].append("标题关键词命中")
+                if query and any(kw in source for kw in query[:4]):
+                    base += 0.05
+                    r["rerank_reasons"].append("来源关键词命中")
+                r["rerank_score"] = round(base, 4)
+            ranked = sorted(results, key=lambda r: r.get("rerank_score", 0), reverse=True)
+            return ranked[:top_k]
 
 
 reranker = Reranker()

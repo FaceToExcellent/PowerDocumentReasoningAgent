@@ -41,9 +41,14 @@ def setup_otel(
         sampler=ParentBased(root=TraceIdRatioBased(sample_ratio)),
     )
     if settings.otel_enabled:
-        provider.add_span_processor(
-            BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
-        )
+        if settings.otel_mode == "console":
+            # 调试模式:span 直接打印到 stdout(结构化),无需任何 collector
+            from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+            provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+        else:
+            provider.add_span_processor(
+                BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
+            )
     # 关闭时不挂 processor：span 照常记录（trace_id 有效）但直接丢弃，
     # 避免本地无 Collector 时 BatchSpanProcessor 反复重试刷日志
     trace.set_tracer_provider(provider)

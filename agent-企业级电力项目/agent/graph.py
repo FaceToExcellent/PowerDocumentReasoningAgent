@@ -216,7 +216,10 @@ async def rag_retrieve_node(state: AgentState) -> dict:
     tenant = state.get("tenant_id", "default")
     user_input = state.get("user_input", "")
     from rag.retriever import rag_service
-    result = rag_service.search(user_input, top_k=5, intent=intent, tenant_id=tenant)
+    # ⭐ agent 级 span:标记是哪个领域 agent 在做检索
+    with tracer.span(f"agent_{intent}_retrieve", intent=intent,
+                     thread_id=state.get("thread_id", "")):
+        result = rag_service.search(user_input, top_k=5, intent=intent, tenant_id=tenant)
     results = result.get("results", [])
     # ⭐ 构建结构化 citations(证据治理层:来源/标题/分数/片段,可审计)
     citations = [
@@ -495,13 +498,15 @@ async def fact_check_node(state: AgentState) -> dict:
                 "fact_check_errors": [], "fact_check_feedback": None}
     try:
         # 传入真实检索上下文,置信度才能反映"检索覆盖 + 引用/接地"
-        result = await asyncio.wait_for(
-            asyncio.to_thread(check_output, output, {
-                "intent": intent,
-                "rag_results": state.get("rag_results"),
-                "citations": state.get("citations"),
-                "rag_hit_rate": state.get("rag_hit_rate", 0.0),
-            }), timeout=5)
+        with tracer.span(f"agent_{intent}_fact_check", intent=intent,
+                         thread_id=state.get("thread_id", "")):
+            result = await asyncio.wait_for(
+                asyncio.to_thread(check_output, output, {
+                    "intent": intent,
+                    "rag_results": state.get("rag_results"),
+                    "citations": state.get("citations"),
+                    "rag_hit_rate": state.get("rag_hit_rate", 0.0),
+                }), timeout=5)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         return {"fact_check_passed": True, "confidence_level": "high",
                 "fact_check_errors": [], "fact_check_feedback": None}
@@ -509,6 +514,18 @@ async def fact_check_node(state: AgentState) -> dict:
         logger.warning(f"FactCheck 失败（默认通过）: {e}")
         return {"fact_check_passed": True, "confidence_level": "high",
                 "fact_check_errors": [], "fact_check_feedback": None}
+
+    # ⭐ Agent 级审计:记录该领域 agent 的一次执行(输入/输出/校验/工具/引用)
+    audit_logger.log_agent(
+        tenant_id=state.get("tenant_id", ""), thread_id=state.get("thread_id", ""),
+        agent=intent, user_input=state.get("user_input", ""),
+        agent_output=state.get("agent_output", ""),
+        fact_check_passed=bool(result.get("passed")),
+        confidence_level=result.get("confidence", "high"),
+        tool_calls=len(state.get("tool_calls") or []),
+        citations_count=len(state.get("citations") or []),
+        iteration=state.get("iteration_count", 0),
+    )
 
     # ⭐ 决策动作:低置信且无依据的具体断言 → 拒答(不硬答)
     if result.get("confidence") == "low" and intent != "chat" and output.strip():
@@ -772,19 +789,23 @@ def route_after_agent(state: AgentState) -> str:
 
 # ── 并行 fan-out / 汇总──────────────────
 def fan_out_parallel(state: AgentState) -> list:
-    """supervisor 判定 parallel 时，把每个意图作为独立子任务分发；
-    其余（fast/chat）单路径走 rag_retrieve，避免空 Send 列表导致图提前 END"""
+    """supervisor 判定 parallel 时,把每个意图作为独立子任务分发到对应领域 agent(子图);
+    单意图/chat 直接路由到对应领域 agent。"""
     from langgraph.types import Send
     plan = state.get("routing_plan") or {}
     intents = plan.get("intents", [])
-    sends = []
-    for intent in intents[:2]:
-        if intent != "chat":
-            sends.append(Send("rag_retrieve", {"intent": intent}))
-    # 无子任务可发（如闲聊 chat）：单路径进 rag_retrieve（内部对 chat 返回空检索）
-    if not sends:
-        return "rag_retrieve"
-    return sends
+    if not intents or len(intents) == 1:
+        intent = intents[0] if intents else "chat"
+        return f"agent_{intent}"
+    return [Send(f"agent_{intent}", {"intent": intent}) for intent in intents[:2]]
+
+
+# 领域 agent 完成后路由:parallel 多意图 → aggregate 汇总,否则直接收尾
+def route_after_subgraph(state: AgentState) -> str:
+    plan = state.get("routing_plan") or {}
+    if plan.get("mode") == "parallel" and len(plan.get("intents", [])) > 1:
+        return "aggregate"
+    return "memory_write"
 
 
 # 汇总 parallel 子结果:拼接后一次汇总 LLM,失败降级为拼接
@@ -804,43 +825,45 @@ async def aggregate_node(state: AgentState) -> dict:
         return {"agent_output": combined, "confidence": 0.5}
 
 
-# ── 构建 & 编译图 ────────────────────────────────
+# ── 构建 & 编译图(P2:父图编排 + 领域 Agent 子图)──
 def build_graph():
-    workflow = StateGraph(AgentState)
+    from agent.domain_agents import build_domain_agent
 
+    workflow = StateGraph(AgentState)
     workflow.add_node("cache_check", cache_check_node)
     workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("rag_retrieve", rag_retrieve_node)
-    workflow.add_node("agent_execute", agent_execute_node, retry_policy=AGENT_RETRY_POLICY)
-    workflow.add_node("fact_check", fact_check_node)
     workflow.add_node("aggregate", aggregate_node)
     workflow.add_node("memory_write", memory_write_node)
     workflow.add_node("execution_log", execution_log_node)
-    workflow.add_node("hitl_review", hitl_review_node)
-    workflow.add_node("external_approval", external_approval_node)
+
+    # 领域 Agent:每个意图一个独立子图(共享 AgentState,独立重试/校验/复核)
+    agent_names = []
+    for intent in list(_current_domain.get_intents()) + ["chat"]:
+        name = f"agent_{intent}"
+        agent_names.append(name)
+        workflow.add_node(name, build_domain_agent(
+            intent,
+            retrieve=rag_retrieve_node,
+            execute=agent_execute_node,
+            fact_check=fact_check_node,
+            hitl=hitl_review_node,
+            external_approval=external_approval_node,
+            retry_policy=AGENT_RETRY_POLICY,
+        ))
 
     workflow.set_entry_point("cache_check")
-
     workflow.add_conditional_edges("cache_check", route_after_cache,
                                    {"supervisor": "supervisor", "execution_log": "execution_log"})
-    # supervisor → parallel 时 fan_out（Send 分发子 Agent） / fast 时单路径 rag_retrieve
-    workflow.add_conditional_edges("supervisor", fan_out_parallel, ["rag_retrieve"])
-    workflow.add_edge("rag_retrieve", "agent_execute")
-    # agent_execute → (CRITICAL) external_approval / (高危) hitl_review / (parallel) aggregate / fact_check
-    workflow.add_conditional_edges("agent_execute", route_after_agent,
-                                   {"fact_check": "fact_check", "aggregate": "aggregate",
-                                    "hitl_review": "hitl_review",
-                                    "external_approval": "external_approval"})
-    # 外部审批恢复后与内联确认走同一路由:approve/modify → agent_execute,否则结束
-    workflow.add_conditional_edges("external_approval", route_after_hitl,
-                                   {"agent_execute": "agent_execute", "memory_write": "memory_write"})
-    workflow.add_edge("aggregate", "fact_check")
-    workflow.add_conditional_edges("fact_check", route_after_fact_check,
-                                   {"agent_execute": "agent_execute", "memory_write": "memory_write"})
+    # supervisor → 领域 agent(单路径 或 parallel Send 分发到多个领域 agent)
+    workflow.add_conditional_edges("supervisor", fan_out_parallel, agent_names)
+    # 每个领域 agent 完成后:parallel → aggregate 汇总,否则直接收尾
+    for name in agent_names:
+        workflow.add_conditional_edges(name, route_after_subgraph,
+                                       {"aggregate": "aggregate", "memory_write": "memory_write"})
+    workflow.add_edge("aggregate", "memory_write")
     workflow.add_edge("memory_write", "execution_log")
     workflow.add_edge("execution_log", END)
-    workflow.add_conditional_edges("hitl_review", route_after_hitl,
-                                   {"agent_execute": "agent_execute", "memory_write": "memory_write"})
+    return workflow
 
     return workflow
 
