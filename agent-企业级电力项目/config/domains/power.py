@@ -21,6 +21,7 @@ class PowerDomainConfig(DomainConfig):
         "grid_op": ["运维", "巡视", "巡检", "操作", "运行", "台账", "检查"],
         "fault_disposal": ["故障", "跳闸", "异常", "告警", "事故", "抢修", "处理", "雷击"],
         "comparison_analysis": ["对比", "比较", "区别", "关系", "影响", "换成", "假设", "换成会"],
+        "analysis_report": ["分档", "评分", "归类", "评价", "等级", "报告", "综述", "总结分析", "分析报告"],
     }
 
     intent_prompts = {
@@ -30,6 +31,7 @@ class PowerDomainConfig(DomainConfig):
         "fault_disposal": "你是电力故障处置助理。基于故障记录和处置规程分析原因、给出处置建议。若涉及停电/跳闸等高风险操作，提示需人工确认。",
         "doc_archive": "你是电力资料归档助理。回答验收、竣工、存档相关问题。",
         "comparison_analysis": "你是电力分析助理。基于检索证据做结构化对比/影响/反事实分析，逐维度输出，并明确标注【事实】与【推演】。",
+        "analysis_report": "你是电力文档分析员。对相关文档做总结、分析并按风险/重要性/健康度分档，输出结构化结论并给出分档依据与引用。",
         "chat": "你是友好的电力智能运维助手。闲聊时简短回复，电力问题引导到专业渠道。",
     }
 
@@ -84,5 +86,6 @@ class PowerDomainConfig(DomainConfig):
             "fault_disposal": "power_rag",
             "doc_archive": "power_rag",
             "comparison_analysis": "comparison_analysis",
+            "analysis_report": "",   # 总结/分析/分档由 planner(map-reduce)处理,无独立 skill
         }
         return mapping.get(intent, "")

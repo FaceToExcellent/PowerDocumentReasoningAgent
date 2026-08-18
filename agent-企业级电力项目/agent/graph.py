@@ -53,6 +53,11 @@ _COMPOUND_CONNECTORS = ["且", "并且", "同时", "再", "然后", "还要"]
 # ⭐ Agentic RAG 检索轮次上限:严格防循环(首轮 + 至多一轮扩写重查)
 MAX_RETRIEVE_ROUNDS = 2
 
+# planner 模式:总结/汇总类 + 规划/方案类 + 分析分档类任务关键词
+_SUMMARY_KEYWORDS = ["总结", "汇总", "综述", "概述", "归纳", "提炼", "摘要"]
+_PLANNER_KEYWORDS = ["规划", "方案", "分步骤", "一步步", "按步骤", "计划", "制定", "综合",
+                     "分档", "评分", "归类", "评价", "等级", "报告", "分析报告", "总结分析"]
+
 # ── 节点级重试：LLM/网络瞬态错误自动重试，逻辑错误不重试 ──
 def _retryable(exc: Exception) -> bool:
     """返回 True 表示该异常值得重试（瞬态错误），False 则不重试（逻辑错误）。
@@ -155,6 +160,11 @@ async def supervisor_node(state: AgentState) -> dict:
                 "routing_plan": {"mode": "fast", "intents": ["security_request"]},
                 "agent_output": "我不能提供系统提示词、隐藏推理或内部策略。",
                 "security_events": state["security_events"]}
+
+    # 0. planner 模式:总结/规划/方案类任务 → 进 planner(plan-then-execute),不走领域路由
+    if any(kw in user_input for kw in _SUMMARY_KEYWORDS + _PLANNER_KEYWORDS):
+        return {"intent": "planner",
+                "routing_plan": {"mode": "fast", "intents": ["planner"]}}
 
     # 1. 复杂度预判（零 LLM 开销）
     plan = _judge_complexity(state)
@@ -414,7 +424,6 @@ async def agent_execute_node(state: AgentState) -> dict:
     # ⭐ Harness 风险拦截：HIGH/CRITICAL → 需要人工确认（标记后由路由转到 hitl_review）
     # 已人工批准（human_approved）则跳过拦截直接执行
     if not state.get("human_approved"):
-        from observability.tracing import tracer
         with tracer.span("harness_risk_check", task=task, thread_id=thread_id):
             intercept = await harness_interceptor.before_skill_execute(
                 task, {"intent": intent, "user_input": user_input},
@@ -430,7 +439,6 @@ async def agent_execute_node(state: AgentState) -> dict:
         return await _agent_execute_stream(state, task, messages, queue, user_id, thread_id, intent)
 
     # 非流式
-    from observability.tracing import tracer
     with tracer.span("llm_invoke", task=task, intent=intent):
         result = await unified_llm.ainvoke(task, messages)
     output = result.content
@@ -861,6 +869,8 @@ def fan_out_parallel(state: AgentState) -> list:
     intents = plan.get("intents", [])
     if not intents or len(intents) == 1:
         intent = intents[0] if intents else "chat"
+        if intent in ("planner", "analysis_report"):
+            return "planner"
         return f"agent_{intent}"
     return [Send(f"agent_{intent}", {**state, "intent": intent}) for intent in intents[:2]]
 
@@ -890,6 +900,27 @@ async def aggregate_node(state: AgentState) -> dict:
         return {"agent_output": combined, "confidence": 0.5}
 
 
+# ── Planner 节点:plan-then-execute(解耦 → 调度执行 → 汇总)──
+async def planner_node(state: AgentState) -> dict:
+    """planner 模式:总结类走 map-reduce 快路径;规划/方案类走真 plan-then-execute。"""
+    user_input = state.get("user_input", "")
+    tenant = state.get("tenant_id", "default")
+    thread = state.get("thread_id", "")
+    from agent.planner import decompose_task, execute_plan, aggregate_plan
+    from rag.summarizer import summarize_docs, extract_topic
+    if any(kw in user_input for kw in _SUMMARY_KEYWORDS):
+        # 总结类:map-reduce 文档汇总(单步计划)
+        output = await summarize_docs(extract_topic(user_input), tenant_id=tenant)
+    else:
+        # 真 planner:解耦 → 调度执行(可并行)→ 汇总
+        steps = await decompose_task(user_input)
+        steps = await execute_plan(steps, tenant_id=tenant, thread_id=thread)
+        output = await aggregate_plan(steps, user_input)
+    return {"agent_output": output, "intent": "planner",
+            "confidence": 0.8, "fact_check_passed": True,
+            "confidence_level": "medium"}
+
+
 # ── 构建 & 编译图(P2:父图编排 + 领域 Agent 子图)──
 def build_graph():
     from agent.domain_agents import build_domain_agent
@@ -902,6 +933,8 @@ def build_graph():
     workflow.add_node("aggregate", span_node("aggregate", aggregate_node))
     workflow.add_node("memory_write", span_node("memory_write", memory_write_node))
     workflow.add_node("execution_log", span_node("execution_log", execution_log_node))
+    # planner 节点:总结/汇总类任务(map-reduce 文档汇总)
+    workflow.add_node("planner", span_node("planner", planner_node))
 
     # 领域 Agent:每个意图一个独立子图(共享 AgentState,独立重试/校验/复核)
     agent_names = []
@@ -921,10 +954,10 @@ def build_graph():
     workflow.set_entry_point("cache_check")
     workflow.add_conditional_edges("cache_check", route_after_cache,
                                    {"supervisor": "supervisor", "execution_log": "execution_log"})
-    # supervisor → 领域 agent(单路径 或 parallel Send 分发到多个领域 agent)
-    workflow.add_conditional_edges("supervisor", fan_out_parallel, agent_names)
-    # 每个领域 agent 完成后:parallel → aggregate 汇总,否则直接收尾
-    for name in agent_names:
+    # supervisor → 领域 agent / planner(单路径 或 parallel Send 分发到多个领域 agent)
+    workflow.add_conditional_edges("supervisor", fan_out_parallel, agent_names + ["planner"])
+    # 每个领域 agent / planner 完成后:parallel → aggregate 汇总,否则直接收尾
+    for name in agent_names + ["planner"]:
         workflow.add_conditional_edges(name, route_after_subgraph,
                                        {"aggregate": "aggregate", "memory_write": "memory_write"})
     workflow.add_edge("aggregate", "memory_write")

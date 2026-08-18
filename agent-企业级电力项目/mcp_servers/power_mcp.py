@@ -47,6 +47,13 @@ async def power_chat(message: str, tenant_id: str = "default") -> str:
     return f"处理失败: {result.get('error', '')}"
 
 
+@mcp.tool()
+async def summarize_docs(topic: str, tenant_id: str = "default") -> str:
+    """文档总结(planner 模式):按主题对知识库文档做 map-reduce 汇总,返回结构化总结。"""
+    from rag.summarizer import summarize_docs as _summarize
+    return await _summarize(topic, tenant_id=tenant_id)
+
+
 async def list_tool_names() -> list:
     """列出已注册的 MCP 工具名(供调试/文档)。"""
     tools = await mcp.list_tools()
