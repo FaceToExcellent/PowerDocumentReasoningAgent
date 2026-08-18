@@ -88,6 +88,7 @@ class AgentState(TypedDict, total=False):
     # 迭代控制
     iteration_count: Annotated[int, _max_value]
     max_iterations: Annotated[int, _first_non_empty]
+    retrieve_count: Annotated[int, _max_value]   # 检索轮次(Agentic RAG 防循环硬守卫)
 
     # 图超时保护
     start_time: Annotated[float, _first_non_empty]
@@ -129,6 +130,7 @@ def create_initial_state(thread_id="", user_id="", account="anonymous", employee
         approved_params=None, approval_mode=None, approval_id=None,
         need_clarification=False, clarification=None,
         cache_hit=False, iteration_count=0, max_iterations=3,
+        retrieve_count=0,
         start_time=0.0, timeout_seconds=180, duration_ms=0,
         messages=[], context_summary=None, recent_rounds=[],
         sub_results=[], security_events=[], error=None,

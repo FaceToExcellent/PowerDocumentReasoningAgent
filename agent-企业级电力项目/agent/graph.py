@@ -50,6 +50,9 @@ DEFAULT_INTENT = list(INTENT_KEYWORDS.keys())[0] if INTENT_KEYWORDS else "chat"
 
 _COMPOUND_CONNECTORS = ["且", "并且", "同时", "再", "然后", "还要"]
 
+# ⭐ Agentic RAG 检索轮次上限:严格防循环(首轮 + 至多一轮扩写重查)
+MAX_RETRIEVE_ROUNDS = 2
+
 # ── 节点级重试：LLM/网络瞬态错误自动重试，逻辑错误不重试 ──
 def _retryable(exc: Exception) -> bool:
     """返回 True 表示该异常值得重试（瞬态错误），False 则不重试（逻辑错误）。
@@ -221,11 +224,36 @@ async def rag_retrieve_node(state: AgentState) -> dict:
     tenant = state.get("tenant_id", "default")
     user_input = state.get("user_input", "")
     from rag.retriever import rag_service
+    from rag.query_expander import query_expander
+    # 检索轮次(严格防循环):即使图级将来重入 retrieve,超过 MAX_RETRIEVE_ROUNDS 也不再扩写
+    round_no = state.get("retrieve_count", 0) + 1
     # ⭐ agent 级 span:标记是哪个领域 agent 在做检索
     with tracer.span(f"agent_{intent}_retrieve", intent=intent,
                      thread_id=state.get("thread_id", "")):
         result = rag_service.search(user_input, top_k=5, intent=intent, tenant_id=tenant)
-    results = result.get("results", [])
+        results = list(result.get("results", []))
+
+        # ⭐ Agentic RAG:仅当(轮次未超限 且 覆盖不足)才扩写重查;
+        #   seen_queries 去重 → 同一个查询绝不搜两遍,杜绝一次调用内的重复查询
+        if round_no < MAX_RETRIEVE_ROUNDS and len(results) < 3:
+            seen_queries = {user_input}
+            for variant in query_expander.expand(user_input, intent=intent)[1:]:
+                if variant in seen_queries:
+                    continue
+                seen_queries.add(variant)
+                with tracer.span("rag_retry_expand", query=variant[:60]):
+                    r2 = rag_service.search(variant, top_k=5, intent=intent, tenant_id=tenant)
+                results.extend(r2.get("results", []))
+            # 按 chunk_id 去重,保留最高分
+            best = {}
+            for it in results:
+                cid = it.get("chunk_id") or (it.get("doc", {}).get("metadata", {}) or {}).get("chunk_id", "")
+                cid = cid or (it.get("doc", {}).get("content", "") or "")[:40]
+                score = float(it.get("score", 0))
+                if cid not in best or score > float(best[cid].get("score", 0)):
+                    best[cid] = it
+            results = sorted(best.values(), key=lambda x: float(x.get("score", 0)),
+                             reverse=True)[:5]
     # ⭐ 构建结构化 citations(证据治理层:来源/标题/分数/片段,可审计)
     citations = [
         {
@@ -241,6 +269,7 @@ async def rag_retrieve_node(state: AgentState) -> dict:
         "rag_results": results,
         "rag_hit_rate": min(1.0, len(results) / 5),
         "citations": citations,
+        "retrieve_count": round_no,
     }
 
 
