@@ -18,8 +18,8 @@ class ShortTermMemory:
     def _key(self, tenant_id: str, thread_id: str) -> str:
         return f"stm:{tenant_id}:{thread_id}"
 
-    # 写入一轮消息，只保留最近 N 轮
-    async def push(self, *, tenant_id="", thread_id="", role="", content="", ttl=3600):
+    # 写入一轮消息，只保留最近 N 轮(默认 24h,避免跨会话就过期)
+    async def push(self, *, tenant_id="", thread_id="", role="", content="", ttl=86400):
         key = self._key(tenant_id, thread_id)
         rounds = await cache_service.get(key) or []
         rounds.append({"role": role, "content": content})

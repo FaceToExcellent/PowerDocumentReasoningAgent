@@ -13,6 +13,19 @@ from config.settings import settings
 from config.logging_config import logger
 
 
+# 从查询提取关键词(jieba 中文分词 + ASCII token),用于记忆语义召回
+def _query_keywords(query: str, limit: int = 8) -> List[str]:
+    import re
+    import jieba
+    kws = []
+    for seg in jieba.cut(str(query or "")):
+        seg = seg.strip()
+        if len(seg) >= 2 and not seg.isspace():
+            kws.append(seg)
+    kws += re.findall(r"[a-zA-Z0-9]{2,}", str(query or ""))
+    return list(dict.fromkeys(kws))[:limit]
+
+
 # 消息流水存储：chat_message 三 ID 表读写
 class MessageStore:
     # 初始化数据库路径、加锁并建表
@@ -97,7 +110,7 @@ class MessageStore:
     # 轻量语义召回：按关键词匹配最近消息
     def semantic_search(self, *, tenant_id="", user_id="", query="", top_k=5) -> List[Dict]:
         """轻量语义召回：关键词匹配最近消息（本机无向量版；生产可接 Milvus 记忆向量）"""
-        kws = [k for k in query[:8] if len(k) > 1]
+        kws = _query_keywords(query)
         if not kws:
             return []
         cond = " OR ".join(["content LIKE ?"] * len(kws))
